@@ -179,7 +179,7 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
     // shader 1.5 -> 0.6 ms/frame, GPU busy 85% -> 77%, frame rate no lower.
     // GOW3_COPY_MERGE_KB overrides it.
     static const vk::DeviceSize MaxDistanceForMerge = [] {
-        const char* env = std::getenv("GOW3_COPY_MERGE_KB");
+        const char* env = std::getenv("ORDER1886_COPY_MERGE_KB");
         return env ? vk::DeviceSize(std::strtoull(env, nullptr, 10)) * 1024 : vk::DeviceSize(64_KB);
     }();
     u32 batch_start = 0;

@@ -127,9 +127,9 @@ int main(int argc, char** argv) {
                "blue_orb_multiplier=1000\ngold_orb_multiplier=0\n";
     }
 #ifdef _WIN32
-    _putenv_s("GOW3_CONFIG", path);
+    _putenv_s("ORDER1886_CONFIG", path);
 #else
-    setenv("GOW3_CONFIG", path, 1);
+    setenv("ORDER1886_CONFIG", path, 1);
 #endif
     auto& v = Gow3Settings::Get();
     Gow3Settings::Load();

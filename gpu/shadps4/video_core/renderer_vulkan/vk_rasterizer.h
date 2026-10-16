@@ -97,6 +97,10 @@ public:
     /// `line`/`function`: the caller, for the statistics of where stage A waits.
     void DrainDrawPipe(u32 reason = DrawPipe::ReasonRasterizer, u32 line = __builtin_LINE(),
                        const char* function = __builtin_FUNCTION());
+    /// ORDER1886 (DrawPipe): any thread (swap/present): waits for the posted draw
+    /// packets (no stats, no stage-A check). The presenter uses it so its cache
+    /// lookups, Transits and records don't race the recording thread's binds.
+    void DrainDrawPipeFromAnyThread();
     /// Runs `task(rasterizer, copy of data)` in order with the draws: on the draw recording
     /// thread while the draw pipeline is in use (PipelinedTasks), else here after a drain.
     using OrderedTask = void (*)(Rasterizer& rasterizer, const u8* data);
@@ -294,8 +298,6 @@ private:
 
     /// Display pass: counts the frame (Gow3Stats::gpu_frames) and, with GOW3_BUFFER_STATS, the lag.
     void NoteFrameStart();
-    /// Without an upscaler: the display buffer of the last NoteFrameStart (HUD draws go there too).
-    VAddr last_display_buffer = 0;
     /// GOW3_GPU_PROFILE: a timestamp where a render pass starts (vk_gpu_profiler.h).
     void MarkPass(const GraphicsPipeline* pipeline, const RenderState& state);
     void BindVertexBuffers(const GraphicsPipeline* pipeline,

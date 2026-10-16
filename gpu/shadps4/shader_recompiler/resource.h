@@ -83,6 +83,10 @@ struct BufferResource {
     bool is_formatted{};
     SharpFetchPostOp post_op{};
     u32 post_op_dw1_mask{};
+    // ORDER1886 (082d6ae): V# construído em runtime com s_mov_b32 immediates (base=0 +
+    // addr64 como endereço guest cru) — sem backing no buffer cache; os loads vão pelo
+    // ReadConst/BDA page table.
+    bool inline_cbuf{};
 
     bool IsSpecial() const noexcept {
         return buffer_type != BufferType::Guest;

@@ -255,7 +255,7 @@ struct Upscaler::Impl {
         push_descriptors = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(
             vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR"));
         period_ns = props.limits.timestampPeriod;
-        const char* profile = std::getenv("GOW3_FSR4_PROFILE");
+        const char* profile = std::getenv("ORDER1886_FSR4_PROFILE");
         if (profile && profile[0] == '1') {
             VkQueryPoolCreateInfo qci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
             qci.queryType = VK_QUERY_TYPE_TIMESTAMP;

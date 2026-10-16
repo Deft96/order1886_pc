@@ -190,7 +190,7 @@ static File *get(int fd) {
     return &files[fd];
 }
 /* GOW3_AUDIO_TRACE=1: sound file opens and failed reads (missing game sounds). */
-static int audio_trace(void) { static int v=-1; if (v<0) { const char *e=getenv("GOW3_AUDIO_TRACE"); v=e && e[0]=='1'; } return v; }
+static int audio_trace(void) { static int v=-1; if (v<0) { const char *e=getenv("ORDER1886_AUDIO_TRACE"); v=e && e[0]=='1'; } return v; }
 /* Game mounts (including linked mod overlays) are read-only. Saves use other mounts. */
 static int game_path(const char *p) {
     if (!p || !*p) return 0;
@@ -246,7 +246,11 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     ++opens;
     pthread_mutex_unlock(&lock);
     if (audio_trace() && strstr(guest,"sound/")) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
-    const char *mod_trace=getenv("GOW3_MOD_TRACE"), *mod_root=getenv("GOW3_MODS_DIR");
+    if (getenv("ORDER1886_TRACE_IMPORTS")) {
+        char m=(flags&3)==0 ? 'r' : (flags&3)==1 ? 'w' : 'R';
+        printf("Runtime: open(%s) -> fd %d (%c)\n",guest,fd,m);
+    }
+    const char *mod_trace=getenv("ORDER1886_MOD_TRACE"), *mod_root=getenv("ORDER1886_MODS_DIR");
     if (mod_trace && mod_trace[0]=='1' && mod_root) {
         char actual[PATH_MAX],root[PATH_MAX];
         static unsigned traced;
@@ -294,13 +298,27 @@ static void touch_for_write(void *buffer,uint64_t size) {
         *b=*b;
     }
 }
+/* Order1886 diag (temporário): leituras curtas/com erro com o caminho do fd. */
+static void read_diag(int fd,uint64_t size,ssize_t n,int64_t offset) {
+    if (n==(ssize_t)size) return;
+    static int logged;
+    int c=__atomic_fetch_add(&logged,1,__ATOMIC_RELAXED);
+    if (c>=30) return;
+    File *f=get(fd);
+    const char *p=f ? f->path : "?";
+    if (n<0) fprintf(stderr,"Runtime: READDIAG fd=%d(%s) req=%llu off=%lld FAILED errno=%d #%d\n",
+                     fd,p,(unsigned long long)size,(long long)offset,errno,c+1);
+    else fprintf(stderr,"Runtime: READDIAG fd=%d(%s) req=%llu got=%lld off=%lld #%d\n",
+                fd,p,(unsigned long long)size,(long long)n,(long long)offset,c+1);
+}
 static int64_t do_read(int fd,void *buffer,uint64_t size) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
     touch_for_write(buffer,size);
     ssize_t n=host_read(h,buffer,size);
-    if (n<0) { if (audio_trace()) printf("Audio trace: read(fd %d, %llu) failed, errno %d\n",fd,(unsigned long long)size,errno); return -errno; }
+    if (n<0) { if (audio_trace()) printf("Audio trace: read(fd %d, %llu) failed, errno %d\n",fd,(unsigned long long)size,errno); read_diag(fd,size,n,-1); return -errno; }
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
+    read_diag(fd,size,n,-1);
     return n;
 }
 static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
@@ -308,13 +326,26 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     if (h<0) return -EBADF;
     touch_for_write(buffer,size);
     ssize_t n=pread(h,buffer,size,offset);
-    if (n<0) { if (audio_trace()) printf("Audio trace: pread(fd %d, %llu @%lld) failed, errno %d\n",fd,(unsigned long long)size,(long long)offset,errno); return -errno; }
+    if (n<0) { if (audio_trace()) printf("Audio trace: pread(fd %d, %llu @%lld) failed, errno %d\n",fd,(unsigned long long)size,(long long)offset,errno); read_diag(fd,size,n,offset); return -errno; }
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
+    read_diag(fd,size,n,offset);
     return n;
 }
 static int64_t do_write(int fd,const void *buffer,uint64_t size) {
+    fprintf(stderr,"Runtime: do_write(fd=%d,size=%llu)\n",fd,(unsigned long long)size);
+    if (getenv("ORDER1886_TRACE_IMPORTS") && size && size<8192 && buffer) {
+        const unsigned char *b=buffer;
+        uint64_t n=size>256 ? 256 : size, printable=0;
+        for (uint64_t i=0;i<n;++i) if ((b[i]>=32 && b[i]<127) || b[i]=='\n' || b[i]=='\r' || b[i]=='\t') ++printable;
+        if (printable*4>=n*3) {
+            fprintf(stderr,"Runtime: write(fd=%d,%llu): %.*s%s\n",fd,(unsigned long long)size,(int)n,
+                    (const char *)buffer,size>n ? "..." : "");
+        } else {
+            fprintf(stderr,"Runtime: write(fd=%d,%llu bytes, binary)\n",fd,(unsigned long long)size);
+        }
+    }
     int h=host_fd(fd);
-    if (h<0) return -EBADF;
+    if (h<0) { fprintf(stderr,"Runtime: write(fd=%d) -> EBADF\n",fd); return -EBADF; }
     ssize_t n=host_write(h,buffer,size);
     if (n<0) return -errno;
     __atomic_add_fetch(&writes,1,__ATOMIC_RELAXED);

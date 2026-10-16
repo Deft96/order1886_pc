@@ -28,7 +28,7 @@
 static uint64_t pool_size_bytes(void) {
     static uint64_t size;
     if (!size) {
-        const char *env = getenv("GOW3_DMEM_MB");
+        const char *env = getenv("ORDER1886_DMEM_MB");
         uint64_t mb = env ? strtoull(env, NULL, 10) : 0;
         if (mb < 5056 || mb > 16384) mb = 5056;
         size = mb * 1024 * 1024;
@@ -88,7 +88,8 @@ typedef void (*GpuRange)(uintptr_t address, uint64_t size);
 static GpuRange hook_map, hook_unmap, hook_invalidate;
 enum { HOOK_MAP, HOOK_UNMAP, HOOK_INVALIDATE };
 typedef struct { int kind; uintptr_t address; uint64_t size; } PendingHook;
-static PendingHook pending[64]; static size_t pending_count;
+/* Order 1886 maps hundreds of ranges in one boot burst; 64 slots overflowed (exit 21). */
+static PendingHook pending[4096]; static size_t pending_count;
 static size_t allocations, maps, flexible_maps, protects, queries;
 static uint64_t live_bytes, flexible_bytes;
 
@@ -729,7 +730,7 @@ static void *toggle_watcher(void *path) {
     return NULL;
 }
 void runtime_memory_set_gpu_hooks(GpuRange map, GpuRange unmap, GpuRange invalidate) {
-    const char *toggles=getenv("GOW3_TOGGLE_FILE");
+    const char *toggles=getenv("ORDER1886_TOGGLE_FILE");
     static pthread_t watcher;
     if (toggles && !watcher) pthread_create(&watcher,NULL,toggle_watcher,(void *)toggles);
     write_lock();

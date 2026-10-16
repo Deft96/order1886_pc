@@ -25,22 +25,22 @@ def added(env):
 class NoMsaaEnvironmentTest(unittest.TestCase):
     def test_auto_leaves_the_game_default_and_keeps_an_inherited_value(self):
         self.assertEqual(launcher.APP_DEFAULTS['no_msaa'], '')
-        self.assertNotIn('GOW3_NO_MSAA', added(launcher.game_environment(dict(launcher.APP_DEFAULTS))))
+        self.assertNotIn('ORDER1886_NO_MSAA', added(launcher.game_environment(dict(launcher.APP_DEFAULTS))))
         # A GOW3_NO_MSAA set by a .bat before the launcher still reaches the game on Auto.
-        with mock.patch.dict(os.environ, {'GOW3_NO_MSAA': '1'}):
-            self.assertEqual(launcher.game_environment(dict(launcher.APP_DEFAULTS))['GOW3_NO_MSAA'], '1')
+        with mock.patch.dict(os.environ, {'ORDER1886_NO_MSAA': '1'}):
+            self.assertEqual(launcher.game_environment(dict(launcher.APP_DEFAULTS))['ORDER1886_NO_MSAA'], '1')
 
     def test_off_and_on_set_the_variable(self):
         for value in ('1', '0'):
             with self.subTest(value=value):
                 env = launcher.game_environment({**launcher.APP_DEFAULTS, 'no_msaa': value})
-                self.assertEqual(env['GOW3_NO_MSAA'], value)
+                self.assertEqual(env['ORDER1886_NO_MSAA'], value)
 
     def test_choices_and_legacy_settings(self):
         self.assertEqual([value for value, _text in launcher.NO_MSAA], ['', '1', '0'])
         legacy = dict(launcher.APP_DEFAULTS)
         legacy.pop('no_msaa')
-        self.assertNotIn('GOW3_NO_MSAA', added(launcher.game_environment(legacy)))
+        self.assertNotIn('ORDER1886_NO_MSAA', added(launcher.game_environment(legacy)))
 
 
 class ChosenGpuTest(unittest.TestCase):
@@ -93,7 +93,7 @@ class NoMsaaLauncherTest(unittest.TestCase):
         self.addCleanup(root.destroy)
 
         def build(language='en', gpu_id=''):
-            with mock.patch.dict(os.environ, {'GOW3_CONFIG': os.devnull}), \
+            with mock.patch.dict(os.environ, {'ORDER1886_CONFIG': os.devnull}), \
                     mock.patch.object(launcher, 'LANG', language), \
                     mock.patch.object(launcher, 'list_gpus', return_value=ARC_LAPTOP):
                 app = launcher.Launcher.__new__(launcher.Launcher)

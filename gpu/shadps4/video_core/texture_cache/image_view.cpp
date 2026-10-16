@@ -54,12 +54,16 @@ ImageViewInfo::ImageViewInfo(const AmdGpu::Image& image, const Shader::ImageReso
     if (is_storage && nfmt == AmdGpu::NumberFormat::Srgb) {
         nfmt = AmdGpu::NumberFormat::Unorm;
     }
-    format = Vulkan::LiverpoolToVK::SurfaceFormat(dfmt, nfmt);
+    // ORDER1886: fallback neutro para combinações sem mapeamento Vulkan (não assertar).
+    format = Vulkan::LiverpoolToVK::TrySurfaceFormat(dfmt, nfmt);
+    if (format == vk::Format::eUndefined) {
+        format = vk::Format::eR32G32B32A32Sfloat;
+    }
     if (desc.is_depth) {
         format = Vulkan::LiverpoolToVK::PromoteFormatToDepth(format);
     }
 
-    range.base.level = image.base_level;
+    range.base.level = std::min<u32>(image.base_level, image.NumLevels() - 1);
     range.base.layer = std::min<u32>(image.base_array, image.NumLayers() - 1);
     range.extent.levels = image.NumViewLevels(desc.is_array);
     range.extent.layers = image.NumViewLayers(desc.is_array);
@@ -75,8 +79,12 @@ ImageViewInfo::ImageViewInfo(const AmdGpu::ColorBuffer& col_buffer) noexcept {
     range.base.layer = col_buffer.BaseSlice();
     range.extent.layers = col_buffer.NumSlices() - range.base.layer;
     type = range.extent.layers > 1 ? AmdGpu::ImageType::Color2DArray : AmdGpu::ImageType::Color2D;
+    // ORDER1886: fallback neutro para combinações sem mapeamento Vulkan (não assertar).
     format =
-        Vulkan::LiverpoolToVK::SurfaceFormat(col_buffer.GetDataFmt(), col_buffer.GetNumberFmt());
+        Vulkan::LiverpoolToVK::TrySurfaceFormat(col_buffer.GetDataFmt(), col_buffer.GetNumberFmt());
+    if (format == vk::Format::eUndefined) {
+        format = vk::Format::eR32G32B32A32Sfloat;
+    }
 }
 
 ImageViewInfo::ImageViewInfo(const AmdGpu::DepthBuffer& depth_buffer, AmdGpu::DepthView view,

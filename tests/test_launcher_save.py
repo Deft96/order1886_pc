@@ -21,20 +21,20 @@ except ImportError:  # pragma: no cover
 @unittest.skipUnless(sys.platform == 'win32' and tk, 'needs Windows and Tk')
 class LauncherOverTemporaryFiles(unittest.TestCase):
     """A real launcher window over a temporary settings folder: the user's files are never touched."""
-    INI = None  # gow3.ini the launcher opens over, when a test needs one
+    INI = None  # order1886.ini the launcher opens over, when a test needs one
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.saved = (launcher.CONFIG_DIR, launcher.CONFIG_FILE, launcher.DATA_DIR, launcher.LANG,
-                      os.environ.get('GOW3_CONFIG'))
+                      os.environ.get('ORDER1886_CONFIG'))
         launcher.CONFIG_DIR = self.tmp / 'config'
         launcher.CONFIG_FILE = launcher.CONFIG_DIR / 'settings.json'
         launcher.DATA_DIR = self.tmp / 'data'
         launcher.DATA_DIR.mkdir()
         launcher.LANG = 'en'
-        os.environ['GOW3_CONFIG'] = str(self.tmp / 'gow3.ini')
+        os.environ['ORDER1886_CONFIG'] = str(self.tmp / 'order1886.ini')
         if self.INI:
-            (self.tmp / 'gow3.ini').write_text(self.INI, encoding='utf-8')
+            (self.tmp / 'order1886.ini').write_text(self.INI, encoding='utf-8')
         self.root = tk.Tk()
         self.app = launcher.Launcher(self.root, tk, ttk, filedialog, messagebox)
         self.root.update()
@@ -48,9 +48,9 @@ class LauncherOverTemporaryFiles(unittest.TestCase):
         self.close_window()
         launcher.CONFIG_DIR, launcher.CONFIG_FILE, launcher.DATA_DIR, launcher.LANG, config = self.saved
         if config is None:
-            os.environ.pop('GOW3_CONFIG', None)
+            os.environ.pop('ORDER1886_CONFIG', None)
         else:
-            os.environ['GOW3_CONFIG'] = config
+            os.environ['ORDER1886_CONFIG'] = config
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def save_state(self):
@@ -90,7 +90,7 @@ class SaveButtonTest(LauncherOverTemporaryFiles):
 
     def test_save_preserves_external_changes_and_refreshes_the_controls(self):
         self.app.save()
-        path = self.tmp / 'gow3.ini'
+        path = self.tmp / 'order1886.ini'
         path.write_text(path.read_text(encoding='utf-8').replace('fps_limit=0', 'fps_limit=60') +
                         'external_runtime_key=keep\n', encoding='utf-8')
         self.app.var('vsync', 'ini').set(False)
@@ -104,7 +104,7 @@ class SaveButtonTest(LauncherOverTemporaryFiles):
 
     def test_failed_replace_keeps_files_and_changes_pending(self):
         self.app.save()
-        path = self.tmp / 'gow3.ini'
+        path = self.tmp / 'order1886.ini'
         before = path.read_bytes(), launcher.CONFIG_FILE.read_bytes()
         self.app.var('vsync', 'ini').set(False)
         with mock.patch.object(launcher.os, 'replace', side_effect=PermissionError('locked')), \
@@ -128,7 +128,7 @@ class SaveButtonTest(LauncherOverTemporaryFiles):
     def test_saving_writes_the_files_and_disables_the_button(self):
         self.app.var('vsync', 'ini').set(False)
         self.app.save()
-        self.assertIn('vsync=0', (self.tmp / 'gow3.ini').read_text(encoding='utf-8').splitlines())
+        self.assertIn('vsync=0', (self.tmp / 'order1886.ini').read_text(encoding='utf-8').splitlines())
         self.assertTrue(launcher.CONFIG_FILE.is_file())
         self.assertEqual(self.save_state(), 'disabled')
 
@@ -156,7 +156,7 @@ class SaveButtonTest(LauncherOverTemporaryFiles):
     def test_nothing_is_written_before_saving(self):
         self.app.var('vsync', 'ini').set(False)
         self.save_state()
-        self.assertFalse((self.tmp / 'gow3.ini').exists())
+        self.assertFalse((self.tmp / 'order1886.ini').exists())
 
 
 class HiddenUpscalingTest(LauncherOverTemporaryFiles):
@@ -190,8 +190,7 @@ class EverySettingSavesTest(LauncherOverTemporaryFiles):
         original = launcher.Launcher.choice
 
         def spy(app, parent, key, store, options, width=30, var=None):
-            pairs = options() if callable(options) else options  # a function: the list changes with the mods
-            self.options[key or 'upscale_mode'] = [value for value, _text in pairs]
+            self.options[key or 'upscale_mode'] = [value for value, _text in options]
             return original(app, parent, key, store, options, width, var)
         self.patches = [mock.patch.object(launcher.Launcher, 'choice', spy),
                         mock.patch.object(launcher.Launcher, 'check_update', lambda app, manual=False: None)]

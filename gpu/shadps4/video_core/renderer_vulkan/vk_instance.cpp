@@ -224,7 +224,7 @@ std::string Instance::GetDriverVersionName() {
 
 namespace {
 bool PipelineBinaryCacheRequested() {
-    const char* setting = std::getenv("GOW3_PIPELINE_BINARIES");
+    const char* setting = std::getenv("ORDER1886_PIPELINE_BINARIES");
     return !setting || *setting != '0';
 }
 }
@@ -444,7 +444,7 @@ bool Instance::CreateDevice() {
     // at (vk_wave_stats.h). Off by default: the feature may change how the driver caches
     // pipelines.
     pipeline_executable_properties = [&] {
-        const char* env = std::getenv("GOW3_WAVE_STATS");
+        const char* env = std::getenv("ORDER1886_WAVE_STATS");
         return env && env[0] == '1' &&
                add_extension(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
     }();
@@ -477,30 +477,21 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    u32 sparse_queue_family_index = queue_family_index;
-    if (!(family_properties[queue_family_index].queueFlags & vk::QueueFlagBits::eSparseBinding)) {
-        const auto sparse_family = std::find_if(
-            family_properties.begin(), family_properties.end(), [](const auto& family) {
-                return family.queueCount && (family.queueFlags & vk::QueueFlagBits::eSparseBinding);
-            });
-        if (sparse_family == family_properties.end()) {
-            return false;
-        }
-        sparse_queue_family_index = static_cast<u32>(sparse_family - family_properties.begin());
-    }
-
     static constexpr std::array queue_priorities = {1.0f};
     const vk::DeviceQueueCreateInfo queue_info = {
         .queueFamilyIndex = queue_family_index,
         .queueCount = static_cast<u32>(queue_priorities.size()),
         .pQueuePriorities = queue_priorities.data(),
     };
-    std::array queue_infos = {queue_info, queue_info};
-    queue_infos[1].queueFamilyIndex = sparse_queue_family_index;
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
     vk13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
+    // gow3/lavapipe diag: the software driver must expose the buffer device address for the
+    // fork's unconditional BDA usage (remove with the rest of the lavapipe work).
+    std::printf("GPU: api version %#x, bufferDeviceAddress=%u, sparseBinding=%u\n",
+                properties.apiVersion, vk12_features.bufferDeviceAddress,
+                features.sparseBinding);
     // gow3: DLSS (optional bridge DLL) needs its own device extensions on NVIDIA GPUs.
     std::vector<const char*> dlss_extensions;
     if (Dlss* dlss = Dlss::Get()) {
@@ -515,8 +506,8 @@ bool Instance::CreateDevice() {
     }
     vk::StructureChain device_chain = {
         vk::DeviceCreateInfo{
-            .queueCreateInfoCount = queue_family_index == sparse_queue_family_index ? 1u : 2u,
-            .pQueueCreateInfos = queue_infos.data(),
+            .queueCreateInfoCount = 1u,
+            .pQueueCreateInfos = &queue_info,
             .enabledExtensionCount = static_cast<u32>(enabled_extensions.size()),
             .ppEnabledExtensionNames = enabled_extensions.data(),
         },
@@ -751,7 +742,6 @@ bool Instance::CreateDevice() {
     }
 
     graphics_queue = device->getQueue(queue_family_index, 0);
-    sparse_queue = device->getQueue(sparse_queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
 
     if (calibrated_timestamps) {
@@ -822,7 +812,7 @@ void Instance::CollectDeviceParameters() {
     vendor_name = driver.driverName.data();
 
     // gow3: see video_core/amdgpu/gow3_msaa.h; the default per driver is gow3_msaa_default.h.
-    const char* no_msaa_env = std::getenv("GOW3_NO_MSAA");
+    const char* no_msaa_env = std::getenv("ORDER1886_NO_MSAA");
     const bool no_msaa = no_msaa_env && *no_msaa_env
                              ? *no_msaa_env == '1'
                              : gow3_no_msaa_default(static_cast<VkDriverId>(driver_id)) != 0;

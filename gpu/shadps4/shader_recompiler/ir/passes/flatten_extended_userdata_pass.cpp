@@ -527,6 +527,9 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
             c.mov(reg, ptr[rsi + (offset << 2)]);
             return true;
         }
+        LOG_ERROR(Render_Recompiler,
+                  "SRT walker: {} without a flattened offset (not visited yet?)",
+                  magic_enum::enum_name(inst->GetOpcode()));
         return false;
     case IR::Opcode::IAdd32:
         ABORT_ON_FAILURE(EmitComputeOffsetIAdd32(c, reg, pass_info, inst));
@@ -564,6 +567,12 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
     case IR::Opcode::BitFieldUExtract:
         ABORT_ON_FAILURE(EmitComputeOffsetBitFieldUExtract(c, reg, pass_info, inst));
         return true;
+    case IR::Opcode::ReadLane:
+        // gow3/order1886: readfirstlane of a uniform SRT offset. An offset is the same on
+        // every lane, so the broadcast is the value itself (the lane argument is ignored).
+        // Without this the walker drops the slot (T# of garbage under threading).
+        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
+        return true;
     default:
         LOG_ERROR(Render_Recompiler, "Unexpected instruction for offset computation, {}",
                   magic_enum::enum_name(inst->GetOpcode()));
@@ -599,7 +608,8 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
     }
 
     if (!PushPtr(c, pass_info, off_dw)) {
-        LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
+        LOG_ERROR(Render_Recompiler, "SRT walker: failed to compute pointer offset ({})",
+                  magic_enum::enum_name(subtree->GetOpcode()));
         return;
     }
     PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
@@ -615,7 +625,12 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
             c.mov(r10d, ptr[rdi + (src_off_dw.U32() << 2)]);
         } else {
             if (!ComputeOffset(c, r10d, pass_info, src_off_dw)) {
-                LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
+                LOG_ERROR(Render_Recompiler,
+                          "SRT walker: failed to compute offset (use {}, src {})",
+                          magic_enum::enum_name(use->GetOpcode()),
+                          src_off_dw.IsImmediate()
+                              ? "imm"
+                              : magic_enum::enum_name(src_off_dw.Inst()->GetOpcode()));
                 continue;
             }
             c.shl(r10d, 2);

@@ -425,7 +425,8 @@ vk::ComponentSwizzle ComponentSwizzle(AmdGpu::CompSwizzle comp_swizzle) {
     case AmdGpu::CompSwizzle::Alpha:
         return vk::ComponentSwizzle::eA;
     default:
-        UNREACHABLE();
+        // ORDER1886: T# de lixo com dst_sel reservado (2/3 no GCN); nunca crashar no bind.
+        return vk::ComponentSwizzle::eZero;
     }
 }
 

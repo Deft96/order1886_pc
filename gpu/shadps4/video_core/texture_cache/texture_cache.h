@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <deque>
 #include "video_core/texture_cache/readback_queue.h"
 #include "video_core/texture_cache/readback_sources.h"
 #include <chrono>
@@ -74,15 +75,11 @@ public:
         ImageInfo info;
         ImageViewInfo view_info;
         BindingType type{BindingType::Texture};
-        /// gow3: the shader reads with integer coordinates (ImageResource::needs_native), not
-        /// normalized sampling. Gates ResolveOverlap's partial height views.
-        bool needs_native{true};
 
         ImageDesc() = default;
         ImageDesc(const AmdGpu::Image& image, const Shader::ImageResource& desc)
             : info{image, desc}, view_info{image, desc},
-              type{desc.is_written ? BindingType::Storage : BindingType::Texture},
-              needs_native{desc.needs_native} {}
+              type{desc.is_written ? BindingType::Storage : BindingType::Texture} {}
         ImageDesc(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
             : info{buffer, hint}, view_info{buffer}, type{BindingType::RenderTarget} {}
         ImageDesc(const AmdGpu::DepthBuffer& buffer, AmdGpu::DepthView view,
@@ -117,11 +114,6 @@ public:
 
     /// Invalidates any image in the logical page range.
     void InvalidateMemory(VAddr addr, size_t size);
-
-    /// gow3 (#138): guest memory written through the backing view (readbacks, buffer
-    /// downloads), which bypasses page tracking. Any lock may be held: images over the range
-    /// are marked CPU-dirty at the next UpdateImage or GC tick (ApplyBackingWrites).
-    void NoteBackingWrite(VAddr address, u64 size);
 
     /// Marks an image as dirty if it exists at the provided address.
     void InvalidateMemoryFromGPU(VAddr address, size_t max_size);
@@ -169,7 +161,6 @@ public:
         constexpr u32 Registered = static_cast<u32>(ImageFlagBits::Registered);
         constexpr u32 Aliased = static_cast<u32>(ImageFlagBits::Aliased);
         return (flags & (Dirty | Registered | Aliased)) == Registered &&
-               !has_backing_writes.load(std::memory_order_acquire) &&
                image.track_addr == image.guest_begin && image.track_addr_end == image.guest_end &&
                image.lru_touched_tick == gc_tick;
     }
@@ -189,18 +180,16 @@ public:
             // Images sharing memory with another take the locked path: SynchronizeAlias.
             constexpr u32 Aliased = static_cast<u32>(ImageFlagBits::Aliased);
             if ((flags & (Dirty | Registered | Aliased)) == Registered &&
-                !has_backing_writes.load(std::memory_order_acquire) &&
                 image.track_addr == image.guest_begin && image.track_addr_end == image.guest_end &&
                 image.lru_touched_tick == gc_tick) {
                 return;
             }
         }
         std::scoped_lock lock{mutex};
-        ApplyBackingWrites();
         Image& image = slot_images[image_id];
         TrackImage(image_id);
         TouchImage(image);
-        RefreshImage(image);
+        RefreshImage(image_id, image);
         SynchronizeAlias(image_id);
     }
 
@@ -213,8 +202,7 @@ public:
     [[nodiscard]] std::tuple<ImageId, int, int> ResolveOverlap(const ImageInfo& info,
                                                                BindingType binding,
                                                                ImageId cache_img_id,
-                                                               ImageId merged_image_id,
-                                                               bool native_reads);
+                                                               ImageId merged_image_id);
 
     /// Resolves depth overlap and either re-creates the image or returns existing one
     [[nodiscard]] ImageId ResolveDepthOverlap(const ImageInfo& requested_info, BindingType binding,
@@ -224,7 +212,9 @@ public:
     [[nodiscard]] ImageId ExpandImage(const ImageInfo& info, ImageId image_id);
 
     /// Reuploads image contents.
-    void RefreshImage(Image& image);
+    void RefreshImage(ImageId image_id, Image& image);
+    /// ORDER1886: serve uploads adiados sem precisar de rebind (one-shot).
+    void DrainDeferredUploads();
 
     /// Retrieves the sampler that matches the provided S# descriptor.
     /// extra_lod_bias: gow3, added to the S#'s bias (reduced scene rendering).
@@ -363,6 +353,9 @@ public:
         }
     }
 
+    /// ORDER1886 diag LIGHT-RT: público para o rasterizer baixar a imagem e ler os pixels.
+    void DownloadImageMemory(ImageId image_id, bool sync = false);
+
 private:
     /// Iterate over all page indices in a range
     template <typename Func>
@@ -379,9 +372,6 @@ private:
             }
         }
     }
-
-    /// Copies image memory back to CPU.
-    void DownloadImageMemory(ImageId image_id, bool sync = false);
 
     /// gow3: a recorded image-to-staging copy, written to guest memory after a GPU wait.
     struct PendingDownload {
@@ -460,16 +450,21 @@ private:
     u64 gc_tick = 0;
     Common::LeastRecentlyUsedCache<ImageId, u64> lru_cache;
     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
+    /// ORDER1886: fila de uploads adiados pelo orcamento (id, uid). Texturas
+    /// one-shot (menu/labels) nunca re-amarradas morriam adiadas para sempre;
+    /// o dreno as serve sem rebind. Entradas mortas saem por preguica no dreno.
+    std::deque<std::pair<ImageId, u64>> deferred_uploads;
+    bool draining_uploads = false;
     const bool readback_linear_images;
     const bool deferred_readbacks = [] {
-        const char* value = std::getenv("GOW3_DEFERRED_READBACK");
+        const char* value = std::getenv("ORDER1886_DEFERRED_READBACK");
         return value && value[0] == '1';
     }();
     /// gow3: GOW3_STALE_READBACK=1 (needs deferred readbacks). A pending copy only blocks CPU
     /// writes: CPU reads see the version the GPU published last (one frame late) instead of
     /// waiting for the GPU. Writes still wait, so no byte is lost.
     const bool stale_readbacks = deferred_readbacks && [] {
-        const char* value = std::getenv("GOW3_STALE_READBACK");
+        const char* value = std::getenv("ORDER1886_STALE_READBACK");
         return value && value[0] == '1';
     }();
     template <bool track>
@@ -481,34 +476,6 @@ private:
         u64 Bytes() const { return u64{width} * height * bits / 8; }
     };
     std::array<ReadbackImageStat, 16> readback_images{};
-    /// gow3 (GOW3_PERF_DIAG): images FindImage had to create, by request, and the image that was
-    /// cached at that memory before (none: nothing overlapped). Printed with the readback report.
-    struct CreateStat {
-        VAddr address;
-        u32 width, height, count;
-        vk::Format format;
-        BindingType binding;
-        const char* reason;
-        VAddr prev_address;
-        u32 prev_width, prev_height, overlaps;
-        vk::Format prev_format;
-        u32 pitch, tile, prev_pitch, prev_tile;
-        bool needs_native;
-    };
-    std::array<CreateStat, 16> create_stats{};
-    u64 images_created = 0;
-    std::chrono::steady_clock::time_point create_report = std::chrono::steady_clock::now();
-    void ReportImageCreates();
-    /// gow3 (GOW3_PERF_DIAG): requests answered by Gow3Toggle::PartialHeightViews.
-    struct PartialViewStat {
-        VAddr address;
-        vk::Format format, used_format;
-        u32 used_width, used_height, min_height, max_height, count;
-        BindingType binding;
-    };
-    std::array<PartialViewStat, 16> partial_view_stats{};
-    u64 partial_views = 0;
-    void NotePartialView(const ImageInfo& request, const ImageInfo& used, BindingType binding);
     u64 readbacks_released = 0;
     ReadbackQueue<Vulkan::StagingBufferRef> pending_readbacks;
     std::mutex readback_mutex;
@@ -520,11 +487,6 @@ private:
     void RetireReadbacks();
     PageTable page_table;
     std::mutex mutex;
-    /// gow3 (#138): under `mutex`. GPU-modified images hold the written data themselves.
-    void ApplyBackingWrites();
-    std::mutex backing_writes_mutex;
-    std::vector<std::pair<VAddr, u64>> backing_writes;
-    std::atomic<bool> has_backing_writes{false};
     /// gow3: images with the same guest address (guarded by `mutex`). `backing` holds the
     /// complete contents; `writer` is a newer write not yet copied into it.
     struct AliasState {
@@ -560,7 +522,6 @@ private:
         AmdGpu::ImageType type{};
         bool exact_fmt = false;
         BindingType binding{};
-        bool needs_native = true;
         u32 levels = 0;
         u32 layers = 0;
         u64 generation = ~0ULL;

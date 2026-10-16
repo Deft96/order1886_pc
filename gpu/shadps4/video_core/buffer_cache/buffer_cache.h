@@ -6,6 +6,8 @@
 #include "gow3_copy.h"
 
 #include <deque>
+#include <mutex>
+#include <unordered_map>
 #include <boost/container/small_vector.hpp>
 
 #include "common/interval_set.h"
@@ -130,6 +132,41 @@ private:
 
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
 
+    /// ORDER1886: memo de binds de arena (40k binds/s re-obtendo os mesmos buffers
+    /// estaticos). So caminho arena, so leitura (!is_written, !is_texel): o stream
+    /// muda de offset a cada bind e a escrita muda freshness. A chave inclui a
+    /// versao (bump em todo upload/write/invalidate) e o hit exige que o
+    /// ResolveReadbacks da chamada nao tenha feito nada. Entradas distintas sao
+    /// limitadas pelos buffers distintos (~milhares); versao u64 nao volta.
+    struct ObtainMemoKey {
+        VAddr addr = 0;
+        u32 size = 0;
+        bool operator==(const ObtainMemoKey& o) const noexcept {
+            return addr == o.addr && size == o.size;
+        }
+    };
+    struct ObtainMemoKeyHash {
+        size_t operator()(const ObtainMemoKey& k) const noexcept {
+            size_t h = std::hash<VAddr>{}(k.addr);
+            h ^= std::hash<u32>{}(k.size) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+    struct ObtainMemoEntry {
+        const Buffer* buffer = nullptr;
+        u64 offset = 0;
+        u64 version = 0;
+    };
+    std::unordered_map<ObtainMemoKey, ObtainMemoEntry, ObtainMemoKeyHash> obtain_memo;
+    std::mutex obtain_memo_mutex;
+    std::atomic<u64> obtain_version{1};
+    /// Bumps sob o mutex do memo (ordena lookup vs mutacao; UploadCopies etc.
+    /// nunca seguram este mutex ao gravar na GPU, sem inversao).
+    void BumpObtainVersion() {
+        std::scoped_lock lock{obtain_memo_mutex};
+        ++obtain_version;
+    }
+
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
 
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
@@ -167,8 +204,7 @@ private:
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
 
-    std::array<const Buffer*, MAX_ARENA_PAGES> address_space{};
-    u64 arena_page_bits{MAX_ARENA_PAGE_BITS};
+    std::array<const Buffer*, MAX_ARENA_PAGES> address_space{};    u64 arena_page_bits{MAX_ARENA_PAGE_BITS};
     u64 arena_page_size{u64{1} << MAX_ARENA_PAGE_BITS};
     u64 num_arena_pages{u64{1} << (ADDRESS_SPACE_BITS - MAX_ARENA_PAGE_BITS)};
     std::deque<Buffer> arenas;

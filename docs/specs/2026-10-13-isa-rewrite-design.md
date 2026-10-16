@@ -49,10 +49,10 @@ tem a instrução seguinte como alvo de salto direto.
 
 ```
 run.py
-  gow3-probe --cpu-features          -> "CPU: missing MOVBE, BMI1, LZCNT" | "CPU: complete"
+  order1886-probe --cpu-features          -> "CPU: missing MOVBE, BMI1, LZCNT" | "CPU: complete"
   prepare.py / link_libc.py / link_modules.py   (como hoje)
   isa_rewrite.py out/boot-linked.bin --out out  (só se faltar algo ou GOW3_ISA_REWRITE=1)
-  gow3-probe out/boot-linked.bin ... --isa-rewrite out/isa-rewrite.bin
+  order1886-probe out/boot-linked.bin ... --isa-rewrite out/isa-rewrite.bin
       cpu_check: conjuntos fatais -> STOP; reescrevíveis -> lista
       carrega imagem, relocações, patches, cheats, hooks, TCB (como hoje)
       isa_rewrite_apply: verifica bytes, gera stubs, aplica jmp/int3
@@ -178,7 +178,7 @@ rewrite is disabled (GOW3_ISA_REWRITE=0)`, código 20. Com tabela válida → se
 ### 5.2 `cpu_check`
 
 `cpu_missing_features` passa a separar os dois grupos (dois buffers ou uma máscara por
-conjunto). Modo novo `gow3-probe --cpu-features`: imprime `CPU: missing MOVBE, BMI1,
+conjunto). Modo novo `order1886-probe --cpu-features`: imprime `CPU: missing MOVBE, BMI1,
 LZCNT` ou `CPU: complete` e sai 0; conjunto fatal ausente imprime a linha `STOP:` e sai 20.
 `GOW3_CPU_CHECK=0` continua pulando a checagem inteira.
 
@@ -289,7 +289,7 @@ vale um caminho rápido em asm para algum sítio.
 
 ## 6. `run.py`
 
-1. Antes dos scripts de preparação, roda `gow3-probe --cpu-features`. Saída 20: imprime a
+1. Antes dos scripts de preparação, roda `order1886-probe --cpu-features`. Saída 20: imprime a
    linha `STOP:` e termina. Lê a lista de conjuntos ausentes.
 2. Depois de `link_modules.py`, se a lista não está vazia ou `GOW3_ISA_REWRITE=1`:
    `run_script('isa_rewrite.py', out / 'boot-linked.bin', '--out', out)`. Sucesso →

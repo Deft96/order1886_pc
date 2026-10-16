@@ -69,9 +69,6 @@ enum : std::uint64_t {
     // when nothing moves. Static-camera flicker of railings/window bars p99.9 -45% (2026-10-03).
     TaaKeepNearerHistory = 1ull << 55,
     SceneMipBias = 1ull << 57, ///< negative LOD bias of G-buffer samplers at reduced scene sizes
-    /// A texture/storage request for the top rows of a cached image (same address and layout)
-    /// uses that image, instead of creating and uploading a new one (texture_cache.cpp).
-    PartialHeightViews = 1ull << 58,
     // Bits 20-29 are used as raw debug toggles by the camera/object motion and the upscaler.
 };
 inline bool Disabled(std::uint64_t bit) {
@@ -98,7 +95,7 @@ inline std::atomic<std::uint64_t> t_resident{0}, t_protect{0}, t_image_create{0}
     t_write_faults{0}, t_copy_cpu{0}, copy_sys_us{0}, copy_minflt{0}, t_gc{0}, t_readback_wait{0};
 /// Diagnostics are collected only with GOW3_FRAME_STATS=1.
 inline const bool enabled = [] {
-    const char* env = std::getenv("GOW3_FRAME_STATS");
+    const char* env = std::getenv("ORDER1886_FRAME_STATS");
     return env && env[0] == '1';
 }();
 struct Timer {
@@ -115,8 +112,42 @@ struct Timer {
                         std::memory_order_relaxed);
     }
 };
+/// ORDER1886: bind timers run only with ORDER1886_BIND_TIMERS=1 (steady_clock
+/// twice per buffer otherwise taxes the very path being measured).
+inline const bool bind_timers = [] {
+    const char* env = std::getenv("ORDER1886_BIND_TIMERS");
+    return env && env[0] == '1';
+}();
+struct BindTimer {
+    std::atomic<std::uint64_t>& total;
+    std::chrono::steady_clock::time_point start =
+        bind_timers ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    ~BindTimer() {
+        if (!bind_timers) {
+            return;
+        }
+        total.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - start)
+                            .count(),
+                        std::memory_order_relaxed);
+    }
+};
 /// Wall time the GPU command thread waited for guest submissions (ns).
 inline std::atomic<std::uint64_t> gpu_idle_ns{0};
+/// ORDER1886 (DrawPipe): per-draw CPU breakdown on the recording path (all threads,
+/// ns). Read in PrintPipeStats with ORDER1886_FRAME_STATS=1 to find what bounds
+/// the open-area throughput (binds vs begin vs vertex vs barriers).
+inline std::atomic<std::uint64_t> t_bindbuf{0}, t_bindtex{0}, t_begin{0}, t_vbemit{0},
+    t_recflush{0};
+inline std::atomic<std::uint64_t> n_binds{0};
+/// ORDER1886 (DrawPipe): BindBuffers detail (ns): constant-ring branch vs the
+/// buffer-cache obtain path (ObtainBuffer + access tracking).
+inline std::atomic<std::uint64_t> t_ring{0}, t_obtain{0};
+inline std::atomic<std::uint64_t> n_bufs{0};
+/// ORDER1886: arena obtain memo hits/misses (buffer_cache.cpp).
+inline std::atomic<std::uint64_t> obtain_hits{0}, obtain_misses{0};
+/// ORDER1886: A-side pipeline selection (GetGraphicsPipeline/GetComputePipeline).
+inline std::atomic<std::uint64_t> t_apipe{0}, n_apipe{0};
 /// Draws recorded into the reduced scene targets, and draws after the scene started.
 inline std::atomic<std::uint64_t> reduced_draws{0}, scene_draws{0};
 /// Wall time spent blocked in the scheduler (ns): waiting for the recording thread to drain,

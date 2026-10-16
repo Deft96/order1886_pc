@@ -392,7 +392,7 @@ struct SignalImpl : public PageManager::Impl {
 
 PageManager::PageManager(Vulkan::Rasterizer* rasterizer_) {
 #ifdef __linux__
-    if (std::getenv("GOW3_UFFD") && std::getenv("GOW3_UFFD")[0] == '1') {
+    if (std::getenv("ORDER1886_UFFD") && std::getenv("ORDER1886_UFFD")[0] == '1') {
         try {
             impl = std::make_unique<UffdImpl>(rasterizer_);
             LOG_INFO(Config, "Memory tracking method: userfaultfd");

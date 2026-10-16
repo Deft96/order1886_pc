@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "gow3_toggles.h"
+#include <cstdio>
 #include <ranges>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -116,6 +117,20 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VmaAllocationInfo alloc_info{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
                                      &allocation, &alloc_info);
+    // ORDER1886 diag (crash VRAM run148): o printf NÃO ia para o order_runN.log
+    // (stdout não capturado) — logar via LOG_ERROR (arquivo) + stderr (console).
+    if (result != VK_SUCCESS) {
+        LOG_ERROR(Render_Vulkan,
+                  "Image create failed: {}x{}x{}, {} levels, {} layers, format {} ({}), tiling {}",
+                  image_ci.extent.width, image_ci.extent.height, image_ci.extent.depth,
+                  image_ci.mipLevels, image_ci.arrayLayers, vk::to_string(image_ci.format),
+                  static_cast<u32>(image_ci.format), static_cast<u32>(image_ci.tiling));
+        std::fprintf(stderr,
+                     "Image create failed: %ux%ux%u, %u levels, %u layers, format %u, tiling %u\n",
+                     image_ci.extent.width, image_ci.extent.height, image_ci.extent.depth,
+                     image_ci.mipLevels, image_ci.arrayLayers, static_cast<u32>(image_ci.format),
+                     static_cast<u32>(image_ci.tiling));
+    }
     ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
                vk::to_string(vk::Result{result}));
     image = vk::Image{unsafe_image};

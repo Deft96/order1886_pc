@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdlib>
 #include <span>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -18,6 +19,7 @@
 #include "shader_recompiler/params.h"
 #include "shader_recompiler/resource.h"
 #include "shader_recompiler/runtime_info.h"
+#include "video_core/amdgpu/pixel_format.h"
 
 namespace Serialization {
 struct Archive;
@@ -241,10 +243,89 @@ struct Info : InfoPersistent {
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
+        // ORDER1886: zera o restante do flatbuf antes do walker. Slots que o walker não
+        // copia (offset não computável — "Failed to compute offset for SRT walker")
+        // ficariam com lixo do draw anterior e virariam T# inválidos que derrubam o
+        // driver AMD. Zero = Image::Null = binding vazio (equivalente ao 7faaa8a).
+        if (flattened_ud_buf.size() > user_data.size()) {
+            std::memset(flattened_ud_buf.data() + user_data.size(), 0,
+                        (flattened_ud_buf.size() - user_data.size()) * sizeof(u32));
+        }
         if (srt_info.walker_func) {
             srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
         }
+        PostRefreshFlatBuf();
     }
+
+    // ORDER1886 (port do 7faaa8a do TdlifePeng — "filter invalid and unused SRT-offset T#
+    // slots"): anula os T# de lixo dos slots SRT (os offsets achatados pelo walker, >=
+    // NUM_USER_DATA_REGS) ANTES que cheguem ao texture cache e à especialização do
+    // pipeline (o lixo inflava as variantes — "too many shader variants" — e, sob o
+    // DrawPipeline, os GPU hangs do driver AMD). Regras (heurísticas do upstream):
+    // - formato FMask;
+    // - range de array inconsistente (last_array < base_array, depth < last_array, ou
+    //   slot não-array com base/last_array não zero);
+    // O filtro roda só com ORDER1886 (o probe seta para o CUSA00035) para não mudar
+    // o comportamento do GoW3. Só os dwords com offset conhecido na região SRT são
+    // escritos (os imediatos ficam — o REJECTT# do bind pega o resto).
+    // gow3: o env é lido UMA vez e a lista das imagens SRT é pré-computada no primeiro
+    // refresh (os offsets não mudam após a compilação) — o filtro roda por draw e não
+    // pode pagar o getenv nem varrer as 64 imagens a cada chamada.
+    void PostRefreshFlatBuf() {
+        static const bool order1886 = std::getenv("ORDER1886") != nullptr;
+        if (!order1886) {
+            return;
+        }
+        if (!srt_filter_ready) {
+            srt_filter_ready = true;
+            for (u32 i = 0; i < images.size(); ++i) {
+                for (const SharpLocation off : images[i].sharp_fetch.offsets) {
+                    if (off != UNKNOWN_LOCATION && off >= NUM_USER_DATA_REGS) {
+                        srt_image_indices.push_back(i);
+                        break;
+                    }
+                }
+            }
+        }
+        for (const u32 idx : srt_image_indices) {
+            const auto& image = images[idx];
+            AmdGpu::Image sharp{};
+            if (!image.sharp_fetch.Fetch(flattened_ud_buf.data(), &sharp)) {
+                continue;
+            }
+            bool clean = false;
+            const auto data_format = static_cast<AmdGpu::DataFormat>(sharp.data_format);
+            if (AmdGpu::IsFmask(data_format)) {
+                clean = true;
+            }
+            const auto image_type = static_cast<AmdGpu::ImageType>(sharp.type);
+            const bool is_array = image_type == AmdGpu::ImageType::Color1DArray ||
+                                  image_type == AmdGpu::ImageType::Color2DArray ||
+                                  image_type == AmdGpu::ImageType::Color2DMsaaArray ||
+                                  image_type == AmdGpu::ImageType::Cube;
+            if (is_array) {
+                if (sharp.last_array < sharp.base_array || sharp.depth < sharp.last_array) {
+                    clean = true;
+                }
+            } else if (sharp.base_array != 0 || sharp.last_array != 0) {
+                clean = true;
+            }
+            if (!clean) {
+                continue;
+            }
+            const AmdGpu::Image null_image = AmdGpu::Image::Null(image.is_depth);
+            const auto* null_dw = reinterpret_cast<const u32*>(&null_image);
+            for (u32 i = 0; i < image.sharp_fetch.offsets.size(); ++i) {
+                const SharpLocation off = image.sharp_fetch.offsets[i];
+                if (off != UNKNOWN_LOCATION && off >= NUM_USER_DATA_REGS) {
+                    flattened_ud_buf[off] = null_dw[i];
+                }
+            }
+        }
+    }
+
+    mutable bool srt_filter_ready = false;
+    mutable std::vector<u32> srt_image_indices;
 
     void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {
         ASSERT(tess_consts_dword_offset >= 0); // We've already tracked the V# UD

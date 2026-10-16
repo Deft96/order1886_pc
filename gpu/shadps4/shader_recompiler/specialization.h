@@ -130,20 +130,41 @@ struct StageSpecialization {
                              spec.element_size = sharp.element_size;
                          }
                      });
-        ForEachSharp(binding, images, info->images,
-                     [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
-                         spec.type = sharp.GetViewType(desc.is_array);
-                         spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
-                         spec.is_storage = desc.is_written;
-                         spec.is_cube = sharp.IsCube();
-                         if (spec.is_storage) {
-                             spec.dst_select = sharp.DstSelect();
-                         } else {
-                             spec.is_srgb = sharp.GetNumberFmt() == AmdGpu::NumberFormat::Srgb;
-                         }
-                         spec.num_conversion = sharp.GetNumberConversion();
-                         spec.num_bindings = desc.NumBindings(*info);
-                     });
+        // ORDER1886: CS de sombra com T# de lixo (af2b036 + descobertas em run): o spec
+        // NÃO deve variar com esses T# — o 804aeead sozinho gerava 163+ permutações
+        // (recompilações que o driver AMD às vezes rejeita com ErrorUnknown no
+        // createComputePipeline). Especializa os images como nulos, igual ao bind vazio.
+        // Os VS ad441fb1/8c8a4817 têm o mesmo padrão (GRAPHICS-FAIL, run57).
+        const bool shadow_cs =
+            info->sw_stage == SwStage::Compute &&
+            (info->pgm_hash == 0xa7b66f58 || info->pgm_hash == 0xefaaab2b ||
+             info->pgm_hash == 0x804aeead || info->pgm_hash == 0x3c2622c0 ||
+             info->pgm_hash == 0x51f03591 || info->pgm_hash == 0xa8b3aa69);
+        const bool garbage_vs = (info->pgm_hash == 0xad441fb1 || info->pgm_hash == 0x8c8a4817 ||
+                                 info->pgm_hash == 0xc75dd317 || info->pgm_hash == 0xd1017d4b ||
+                                 info->pgm_hash == 0x539eee77 ||
+                                 // ORDER1886 (run209/run232, QTE elevador): FS parceiro do
+                                 // 8c8a4817 no par que o driver rejeita (GRAPHICS-FAIL).
+                                 info->pgm_hash == 0x88c3afad);
+        if (shadow_cs || garbage_vs) {
+            binding += static_cast<u32>(info->images.size());
+        } else {
+            ForEachSharp(binding, images, info->images,
+                         [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
+                             spec.type = sharp.GetViewType(desc.is_array);
+                             spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
+                             spec.is_storage = desc.is_written;
+                             spec.is_cube = sharp.IsCube();
+                             if (spec.is_storage) {
+                                 spec.dst_select = sharp.DstSelect();
+                             } else {
+                                 spec.is_srgb =
+                                     sharp.GetNumberFmt() == AmdGpu::NumberFormat::Srgb;
+                             }
+                             spec.num_conversion = sharp.GetNumberConversion();
+                             spec.num_bindings = desc.NumBindings(*info);
+                         });
+        }
         ForEachSharp(binding, fmasks, info->fmasks,
                      [](auto& spec, const auto& desc, AmdGpu::Image sharp) {
                          spec.width = sharp.width;

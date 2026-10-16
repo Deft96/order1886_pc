@@ -30,7 +30,7 @@ std::mutex Scheduler::submit_mutex;
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
     // gow3: GOW3_VK_RECORD_THREAD=0 records on the calling thread.
-    const char* env = std::getenv("GOW3_VK_RECORD_THREAD");
+    const char* env = std::getenv("ORDER1886_VK_RECORD_THREAD");
     if (threaded_recording && !(env && env[0] == '0')) {
         record_chunk = AcquireChunk();
         recorder_thread = std::jthread(std::bind_front(&Scheduler::RecorderThread, this));
@@ -58,7 +58,7 @@ Scheduler::~Scheduler() {
 
 bool Scheduler::FullBarriers() {
     static const bool enabled = [] {
-        const char* env = std::getenv("GOW3_FULL_BARRIERS");
+        const char* env = std::getenv("ORDER1886_FULL_BARRIERS");
         const bool on = env && env[0] == '1';
         if (on) {
             // In last_run.log whatever the GPU log level, so a tester's log shows the mode.
@@ -173,7 +173,7 @@ void Scheduler::EndRendering() {
 
 void Scheduler::TraceDirectRecording(void* caller) {
     static const bool enabled = [] {
-        const char* env = std::getenv("GOW3_RECORDER_TRACE");
+        const char* env = std::getenv("ORDER1886_RECORDER_TRACE");
         return env && env[0] == '1';
     }();
     if (!enabled) {
@@ -269,6 +269,7 @@ void Scheduler::KickRecording(bool force) {
     }
     // Callers kick where nobody holds the raw command buffer: deferral resumes.
     direct_mode = false;
+    std::scoped_lock rlk{record_mutex};
     // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
     if (!force && full_chunks.empty() && record_chunk->Size() < 32 * 1024) {
         return;

@@ -108,7 +108,7 @@ def test_cpu_features_mode_reports_this_machine(self):
 
 - [ ] **Passo 7: build do probe e testes**
 
-Run (MSYS2, ver Global Constraints): `ninja -C out/w gow3-probe cpu-check-test && out/w/cpu-check-test.exe`; copie `out/w/gow3-probe.exe` para `out/gow3-probe.exe` (com as DLLs no PATH) e `python -m unittest discover -s tests -p "test_probe.py" -v` (o `.exe` em `out/` faz o `skipUnless` passar).
+Run (MSYS2, ver Global Constraints): `ninja -C out/w order1886-probe cpu-check-test && out/w/cpu-check-test.exe`; copie `out/w/order1886-probe.exe` para `out/order1886-probe.exe` (com as DLLs no PATH) e `python -m unittest discover -s tests -p "test_probe.py" -v` (o `.exe` em `out/` faz o `skipUnless` passar).
 Expected: `cpu-check-test ok`; `test_cpu_features_mode_reports_this_machine ... ok`.
 
 - [ ] **Passo 8: commit**
@@ -488,7 +488,7 @@ Expected: `isa-stub-test ok`.
 
 **Files:**
 - Modify: `src/probe.c` (parse das opções em `main`; `allocate(round_page(size))` da imagem; bloco após `patch_tcb_loads` e antes do primeiro `protect`; `vectored_fault`, `fatal_exception`, `describe_address` no Windows; `fault()` e a instalação de `sigaction` no Linux), `src/runtime.h`, `src/runtime.c` (`runtime_report`)
-- Modify: `build.sh` (linha do `gow3-probe`: `out/isa_emulate.o` compilado com `-mgeneral-regs-only` e `src/isa_rewrite.c`), `gpu/CMakeLists.txt` (`add_executable(gow3-probe ...)` ganha `../src/isa_rewrite.c ../src/isa_emulate.c` com a `COMPILE_OPTIONS` do `isa_emulate.c`)
+- Modify: `build.sh` (linha do `order1886-probe`: `out/isa_emulate.o` compilado com `-mgeneral-regs-only` e `src/isa_rewrite.c`), `gpu/CMakeLists.txt` (`add_executable(order1886-probe ...)` ganha `../src/isa_rewrite.c ../src/isa_emulate.c` com a `COMPILE_OPTIONS` do `isa_emulate.c`)
 
 **Interfaces:**
 - Consumes: `IsaTable`, `isa_table_load`, `isa_table_matches`, `isa_stub_area_size`, `isa_rewrite_apply`, `isa_rewrite_trap`, `isa_rewrite_site_of_stub`, `isa_rewrite_report`, `isa_emulate_set_image`; `cpu_missing_sets` da Tarefa 1.
@@ -498,7 +498,7 @@ Sem teste unitário novo: a verificação é o probe construído, o `isa-stub-te
 
 - [ ] **Passo 1: opção e política**
 
-`--isa-rewrite <file>` no loop de opções (`isa_file`), na linha `Usage:`. Após o bloco de CPU: `const char *policy = getenv("GOW3_ISA_REWRITE")`; `unsigned isa_sets = policy && !strcmp(policy, "1") ? 0xffffffffu : policy && !strcmp(policy, "0") ? 0 : cpu_missing_sets;`. Se `cpu_missing_sets && !isa_sets` (política `0`) ou `isa_sets && cpu_missing_sets && !isa_file` → `printf("STOP: this CPU lacks %s and no rewrite table matches the image\n", missing)`, `return 20`.
+`--isa-rewrite <file>` no loop de opções (`isa_file`), na linha `Usage:`. Após o bloco de CPU: `const char *policy = getenv("ORDER1886_ISA_REWRITE")`; `unsigned isa_sets = policy && !strcmp(policy, "1") ? 0xffffffffu : policy && !strcmp(policy, "0") ? 0 : cpu_missing_sets;`. Se `cpu_missing_sets && !isa_sets` (política `0`) ou `isa_sets && cpu_missing_sets && !isa_file` → `printf("STOP: this CPU lacks %s and no rewrite table matches the image\n", missing)`, `return 20`.
 
 - [ ] **Passo 2: carregar a tabela e reservar a área de stubs**
 
@@ -526,7 +526,7 @@ Windows, em `vectored_fault` antes do bloco de falhas fatais: `if (code == EXCEP
 
 - [ ] **Passo 5: build e testes**
 
-Run: `ninja -C out/w gow3-probe isa-stub-test isa-emulate-test cpu-check-test` e os três testes; `python -m unittest discover -s tests -p "test_*.py"`.
+Run: `ninja -C out/w order1886-probe isa-stub-test isa-emulate-test cpu-check-test` e os três testes; `python -m unittest discover -s tests -p "test_*.py"`.
 Expected: build sem avisos; `isa-stub-test ok`, `isa-emulate-test ok`, `cpu-check-test ok`; Python sem regressão (só as 5 falhas pré-existentes).
 
 - [ ] **Passo 6: commit**
@@ -559,9 +559,9 @@ def test_rewrite_wanted_follows_cpu_by_default(self):
     self.assertTrue(run.isa_rewrite_wanted(['MOVBE'], {}))
     self.assertFalse(run.isa_rewrite_wanted([], {}))
 def test_rewrite_forced(self):
-    self.assertTrue(run.isa_rewrite_wanted([], {'GOW3_ISA_REWRITE': '1'}))
+    self.assertTrue(run.isa_rewrite_wanted([], {'ORDER1886_ISA_REWRITE': '1'}))
 def test_rewrite_disabled(self):
-    self.assertFalse(run.isa_rewrite_wanted(['MOVBE', 'BMI1'], {'GOW3_ISA_REWRITE': '0'}))
+    self.assertFalse(run.isa_rewrite_wanted(['MOVBE', 'BMI1'], {'ORDER1886_ISA_REWRITE': '0'}))
 ```
 
 - [ ] **Passo 2: rodar e ver falhar**
@@ -614,12 +614,12 @@ Expected: cada arquivo aparece ao menos uma vez; `bash -n packaging/windows/pack
 
 - [ ] **Passo 1: build completo e testes**
 
-Run (MSYS2 em `/w`): `ninja -C out/w gow3-probe gow3-gpu-capabilities gow3-play cpu-check-test isa-emulate-test isa-stub-test`, os três testes, e `python -m unittest discover -s tests -p "test_*.py"`.
+Run (MSYS2 em `/w`): `ninja -C out/w order1886-probe gow3-gpu-capabilities gow3-play cpu-check-test isa-emulate-test isa-stub-test`, os três testes, e `python -m unittest discover -s tests -p "test_*.py"`.
 Expected: três `ok`; Python só com as 5 falhas pré-existentes.
 
 - [ ] **Passo 2: jogo em modo forçado**
 
-Com `out/gow3-probe.exe` atualizado e o Python do repositório com `iced-x86`: `GOW3_ISA_REWRITE=1 GOW3_GAME_DIR="C:/Users/Lucas Emiliano/Documents/My Games/GOW III/God.of.War.III.Remastered.PS4-CUSA01623/Image0" python run.py`.
+Com `out/order1886-probe.exe` atualizado e o Python do repositório com `iced-x86`: `GOW3_ISA_REWRITE=1 GOW3_GAME_DIR="C:/Users/Lucas Emiliano/Documents/My Games/GOW III/God.of.War.III.Remastered.PS4-CUSA01623/Image0" python run.py`.
 Expected no log: `CPU: complete`, `ISA: 14xx sites (MOVBE 104, BMI1 12xx, LZCNT 77, F16C 0); 8x relocated, 0 int3, 0 unsupported`, `ISA: forced rewrite of all 14xx sites (GOW3_ISA_REWRITE=1)`; o jogo abre, chega ao menu e a uma luta sem falha nova; ao fechar, `ISA: most executed sites:` com até 10 linhas. Registre as linhas `ISA:` no resumo da tarefa (elas dizem se a abordagem C da spec algum dia compensa).
 
 - [ ] **Passo 3: sem a variável**

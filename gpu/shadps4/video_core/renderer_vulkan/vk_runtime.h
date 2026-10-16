@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <mutex>
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_barrier_tracker.h"
@@ -52,6 +53,10 @@ public:
     bool Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
                  vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access,
                  std::optional<VideoCore::SubresourceRange> subres_range = {});
+
+    /// ORDER1886: layout atual do backing sob o mutex de barreiras (a leitura
+    /// fora do Transit sem exclusao lia estado rasgado entre stages).
+    vk::ImageLayout GetBackingLayout(const VideoCore::Image* image);
 
     /// GOW3_GPU_PROFILE: a profiler segment for a transfer of `image` while it lives; the
     /// segment it interrupted continues afterwards.
@@ -120,6 +125,12 @@ private:
     StagingBufferPool staging_pool;
     BarrierTracker barrier_tracker;
     VideoCore::Image::Barriers image_barriers;
+    /// ORDER1886 (DrawPipe): estado de layout dos backings + image_barriers sao
+    /// tocados pelo Stage A (dispatch direto, uploads) e lidos pelo Stage B
+    /// (binds) sem exclusao -> descritor com layout rasgado -> VUID-09600 ->
+    /// fault no driver. Mutex leaf: so protege estado+barreiras; nunca tomar
+    /// outro lock segurando este (o hook de BindHelper roda FORA dele).
+    std::mutex image_barrier_mutex;
     vk::MemoryBarrier2 memory_barrier{};
     // gow3: ranges inserted into barrier_tracker since its last Clear(); re-inserting a
     // contained range is a no-op, and draws re-bind the same ranges constantly.

@@ -8,7 +8,7 @@
 namespace Common::Log {
 static Level threshold() {
     static const Level level = [] {
-        const char* v = std::getenv("GOW3_GPU_LOG");
+        const char* v = std::getenv("ORDER1886_GPU_LOG");
         if (!v) return Level::warn;
         static const char* names[] = {"trace", "debug", "info", "warning", "error", "critical"};
         for (int i = 0; i < 6; ++i)

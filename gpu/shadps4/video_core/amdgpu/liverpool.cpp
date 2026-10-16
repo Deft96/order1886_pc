@@ -266,7 +266,7 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
     // slower (79 vs 83 FPS): the guest waits on these fences, and later fences stall it more
     // than the wait costs.
     static const bool async_fences = [] {
-        const char* env = std::getenv("GOW3_ASYNC_FENCES");
+        const char* env = std::getenv("ORDER1886_ASYNC_FENCES");
         return env && env[0] == '1';
     }();
     if (async_fences && !Gow3Toggle::Disabled(Gow3Toggle::AsyncFences)) {
@@ -512,6 +512,19 @@ void Liverpool::ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header,
     }
     case PM4ItOpcode::SetContextReg: {
         const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
+        // ORDER1886: escritas nos CLEAR_WORD regs (CB[n].clear_word0 = 0xAC + 16n) — o
+        // jogo "arma" o clear escrevendo aqui. Marca o ENDEREÇO do CB vigente.
+        {
+            const u32 off = set_data->reg_offset;
+            const u32 cnt = count - 1;
+            for (u32 n = 0; n < AmdGpu::NUM_COLOR_BUFFERS; ++n) {
+                const u32 cw0 = 0xAC + 16 * n;
+                if (off <= cw0 && off + cnt > cw0) {
+                    AmdGpu::clear_word_armed_addr[n].store(regs.color_buffers[n].Address(),
+                                                           std::memory_order_relaxed);
+                }
+            }
+        }
         std::memcpy(&regs.reg_array[Regs::ContextRegWordOffset + set_data->reg_offset], payload,
                     (count - 1) * sizeof(u32));
         mark(Regs::ContextRegWordOffset + set_data->reg_offset, count - 1);
@@ -715,7 +728,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     if (draw_prep) {
         draw_prep->BeginSubmission(seq, regs, gfx_reg_checksum);
     }
-    static const bool dcb_stats = EmulatorSettingsImpl::Flag("GOW3_DCB_STATS", false);
+    static const bool dcb_stats = EmulatorSettingsImpl::Flag("ORDER1886_DCB_STATS", false);
     const int dcb_depth = g_dcb_depth;
     if (dcb_stats) {
         ScanDcb(dcb, dcb_depth);

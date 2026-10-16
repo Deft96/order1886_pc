@@ -62,7 +62,7 @@ static void sleep_until(uint64_t deadline) {
 }
 static int sdl_audio(void) {
     if (sdl_ready<0) {
-        const char *mode=getenv("GOW3_AUDIO");
+        const char *mode=getenv("ORDER1886_AUDIO");
         sdl_ready = (!mode || strcmp(mode,"none")) && SDL_InitSubSystem(SDL_INIT_AUDIO);
         printf("Runtime: audio backend %s\n", sdl_ready ? SDL_GetCurrentAudioDriver() : "timer (silent)");
     }
@@ -144,8 +144,8 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
         if (p->stream) SDL_ResumeAudioStreamDevice(p->stream);
         else fprintf(stderr,"Runtime: SDL audio stream failed (%s); port %d uses the timer sink\n",SDL_GetError(),id);
     }
-    p->stats=getenv("GOW3_AUDIO_STATS")!=NULL;
-    const char *dump=getenv("GOW3_AUDIO_DUMP");
+    p->stats=getenv("ORDER1886_AUDIO_STATS")!=NULL;
+    const char *dump=getenv("ORDER1886_AUDIO_DUMP");
     if (dump) {
         char path[4096];
         snprintf(path,sizeof(path),"%s.port%d.%dch.%s",dump,id,p->downmix ? 2 : p->channels,p->is_float ? "f32" : "s16");

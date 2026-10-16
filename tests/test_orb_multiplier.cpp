@@ -95,9 +95,9 @@ int main(int argc, char** argv) {
     auto config = std::filesystem::temp_directory_path() / "gow3-orb-multiplier-test.ini";
     assert(!std::filesystem::exists(config));
 #ifdef _WIN32
-    _putenv_s("GOW3_CONFIG", config.string().c_str());
+    _putenv_s("ORDER1886_CONFIG", config.string().c_str());
 #else
-    setenv("GOW3_CONFIG", config.string().c_str(), 1);
+    setenv("ORDER1886_CONFIG", config.string().c_str(), 1);
 #endif
     settings.red_orb_multiplier = 0.125f;
     settings.cheats[0] = true;

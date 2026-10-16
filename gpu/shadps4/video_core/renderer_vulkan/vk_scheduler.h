@@ -752,6 +752,9 @@ public:
             func(current_cmdbuf);
             return;
         }
+        // gow3/order1886: the draw pipe's stage B records draws on its own thread while stage A
+        // keeps recording: the current chunk and the full-chunk list are shared state.
+        std::scoped_lock lk{record_mutex};
         if (!record_chunk->Push(std::forward<Func>(func))) {
             full_chunks.push_back(std::move(record_chunk));
             record_chunk = AcquireChunk();
@@ -772,7 +775,17 @@ public:
         if (!IsRecordingDeferred()) {
             return;
         }
-        ASSERT(bytes + 1024 <= RecordChunk::Capacity);
+        if (bytes + 1024 > RecordChunk::Capacity) {
+            // gow3: a single write set larger than any chunk (a giant descriptor array, e.g.
+            // The Order 1886) cannot be deferred: record this command directly instead of
+            // asserting (the deferred commands recorded so far are flushed first).
+            std::printf("ReserveRecordData: oversized write set (%zu bytes) from %p — direct mode\n",
+                        bytes, __builtin_return_address(0));
+            SyncRecording();
+            direct_mode = true;
+            return;
+        }
+        std::scoped_lock lk{record_mutex};
         if (RecordChunk::Capacity - record_chunk->Size() < bytes + 1024) {
             full_chunks.push_back(std::move(record_chunk));
             record_chunk = AcquireChunk();
@@ -788,7 +801,19 @@ public:
         }
         // Room for the data and the command that follows it, so both stay in one chunk.
         const size_t bytes = data.size_bytes();
-        ReserveRecordData(bytes + alignof(T));
+        if (bytes + alignof(T) + 1024 > RecordChunk::Capacity) {
+            // gow3: too large for any chunk: record this command directly (see ReserveRecordData).
+            SyncRecording();
+            direct_mode = true;
+            return data;
+        }
+        // gow3/order1886: reserve, allocate and copy under one lock so the stage B data and its
+        // command share a chunk even while stage A records.
+        std::scoped_lock lk{record_mutex};
+        if (RecordChunk::Capacity - record_chunk->Size() < bytes + alignof(T) + 1024) {
+            full_chunks.push_back(std::move(record_chunk));
+            record_chunk = AcquireChunk();
+        }
         auto* dst = static_cast<T*>(record_chunk->Allocate(bytes, alignof(T)));
         std::memcpy(dst, data.data(), bytes);
         return {dst, data.size()};
@@ -918,6 +943,10 @@ private:
     std::unique_ptr<RecordChunk> record_chunk;
     std::vector<std::unique_ptr<RecordChunk>> full_chunks;
     std::mutex recorder_mutex;
+    /// gow3/order1886: guards record_chunk and full_chunks while the draw pipe's stage B
+    /// records on its own thread at the same time as stage A (lock order: record_mutex
+    /// before recorder_mutex, as in KickRecording).
+    std::mutex record_mutex;
     std::condition_variable_any recorder_cv;
     std::condition_variable_any recorder_idle_cv;
     std::deque<std::unique_ptr<RecordChunk>> recorder_queue;

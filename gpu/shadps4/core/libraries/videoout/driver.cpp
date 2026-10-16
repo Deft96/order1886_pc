@@ -73,7 +73,7 @@ VideoOutDriver::VideoOutDriver(u32 width, u32 height) {
     main_port.resolution.full_height = height;
     main_port.resolution.pane_width = width;
     main_port.resolution.pane_height = height;
-    const char* separate = std::getenv("GOW3_PRESENT_THREAD");
+    const char* separate = std::getenv("ORDER1886_PRESENT_THREAD");
     separate_swap = !(separate && separate[0] == '0');
     if (separate_swap) {
         swap_thread = std::jthread([&](std::stop_token token) { SwapThread(token); });
@@ -301,6 +301,14 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
 }
 
 void VideoOutDriver::Flip(const Request& req) {
+    // ORDER1886 diag (GOW3_TIMER_TRACE=1): the acceptance time, paired with FLIP-SUBMIT.
+    static unsigned flip_accepts;
+    if (std::getenv("ORDER1886_TIMER_TRACE") && flip_accepts++ < 300) {
+        std::printf("FLIP-ACCEPT t=%lld\n",
+                    static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                              std::chrono::steady_clock::now().time_since_epoch())
+                                              .count()));
+    }
     // Update HDR status before presenting, then present the frame (gow3: on the swap thread).
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
         presenter->SetHDR(hdr);
@@ -310,7 +318,7 @@ void VideoOutDriver::Flip(const Request& req) {
                                                 : 0);
 
     // gow3: GOW3_FRAME_STATS=1 prints flip rate and frame time spread every 5 seconds.
-    static const bool frame_stats = EmulatorSettingsImpl::Flag("GOW3_FRAME_STATS", false);
+    static const bool frame_stats = EmulatorSettingsImpl::Flag("ORDER1886_FRAME_STATS", false);
     if (frame_stats) {
         using Clock = std::chrono::steady_clock;
         static Clock::time_point window_start = Clock::now(), last = window_start;
@@ -334,14 +342,10 @@ void VideoOutDriver::Flip(const Request& req) {
         static u64 last_proc_flt, last_copy_ns, last_copy_bytes, last_rf, last_trf, last_twf;
         const u64 rf = Gow3Stats::read_faults.load(), trf = Gow3Stats::t_read_faults.load(),
                   twf = Gow3Stats::t_write_faults.load();
-        // gow3: every frame over 40 ms (GOW3_STALL_MS) after the first, at most 10 per 5 s window.
-        static const double stall_ms = [] {
-            const char* value = std::getenv("GOW3_STALL_MS");
-            return value ? std::atof(value) : 40.0;
-        }();
+        // gow3: every frame over 40 ms after the first, at most 10 per 5 s window.
         static bool primed = false;
         static u32 stalls_shown = 0;
-        const bool stall = primed && frame_ms > stall_ms && stalls_shown < 10;
+        const bool stall = primed && frame_ms > 40.0 && stalls_shown < 10;
         stalls_shown += stall;
         primed = true;
         // Waits and work inside the long frame (window counters are reset every 5 s, so the
@@ -663,7 +667,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     // until its slot; slots advance by one period (no drift) but never lag behind by more.
     // gow3: the in-game menu changes the limit live (Gow3Settings::fps_limit); GOW3_FPS_LIMIT
     // and the uncapped presets keep their fixed limit.
-    const bool fixed_limit = std::getenv("GOW3_FPS_LIMIT") || EmulatorSettings.GetVblankFrequency() == 480;
+    const bool fixed_limit = std::getenv("ORDER1886_FPS_LIMIT") || EmulatorSettings.GetVblankFrequency() == 480;
     const auto current_limit = [&] {
         const auto& s = Gow3Settings::Get();
         return fixed_limit ? EmulatorSettings.GetFrameLimit()

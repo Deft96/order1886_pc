@@ -143,7 +143,7 @@ set(COMMON
 file(GLOB AVPLAYER CONFIGURE_DEPENDS shadps4/core/libraries/avplayer/*.cpp)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
 file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp)
-# Windows: a DLL cannot leave the runtime_* symbols for gow3-probe.exe to resolve, so the
+# Windows: a DLL cannot leave the runtime_* symbols for order1886-probe.exe to resolve, so the
 # library is static there and linked into the executable.
 if (WIN32)
     set(GOW3GPU_KIND STATIC)
@@ -169,7 +169,7 @@ set_source_files_properties(shim/gow3_overlay.cpp PROPERTIES
 target_include_directories(gow3gpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)
 target_compile_definitions(gow3gpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(gow3gpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
-# Runtime symbols (runtime_memory_*, runtime_process_*) resolve against gow3-probe.
+# Runtime symbols (runtime_memory_*, runtime_process_*) resolve against order1886-probe.
 if (NOT WIN32)
     target_link_options(gow3gpu PRIVATE -Wl,--allow-shlib-undefined)
 endif()
@@ -196,16 +196,16 @@ if (WIN32)
     add_library(atrac9 STATIC ${GOW3_ATRAC9})
     target_compile_options(atrac9 PRIVATE -w)
     set_target_properties(atrac9 PROPERTIES C_STANDARD 99 INTERPROCEDURAL_OPTIMIZATION OFF)
-    add_executable(gow3-probe ../src/probe.c ${GOW3_RUNTIME} ../src/compat_win.c ../src/cpu_check.c ../src/vulkan_smoke.c
+    add_executable(order1886-probe ../src/probe.c ${GOW3_RUNTIME} ../src/compat_win.c ../src/cpu_check.c ../src/vulkan_smoke.c
         ../src/isa_rewrite.c ../src/isa_emulate.c
-        ../packaging/windows/gow3-probe.rc)
-    set_target_properties(gow3-probe PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(gow3-probe PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror>)
-    target_include_directories(gow3-probe PRIVATE .. ../src)
-    target_link_libraries(gow3-probe PRIVATE gow3gpu atrac9 onecore bcrypt ws2_32 -pthread)
+        ../packaging/windows/order1886-probe.rc)
+    set_target_properties(order1886-probe PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+    target_compile_options(order1886-probe PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror>)
+    target_include_directories(order1886-probe PRIVATE .. ../src)
+    target_link_libraries(order1886-probe PRIVATE gow3gpu atrac9 onecore bcrypt ws2_32 -pthread)
     # The PS4 range (64 GiB - 1 TiB) must stay free: no high-entropy ASLR for heaps and stacks.
     # The guest main thread runs on the process stack: 16 MiB, committed (no stack probes).
-    target_link_options(gow3-probe PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
+    target_link_options(order1886-probe PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
     # gow3: runtime unit tests (ninja -C out/gpu mp3-test videodec-test services-test).
     add_executable(mp3-test EXCLUDE_FROM_ALL ../tests/test_mp3.c ../src/runtime_mp3.c ../src/compat_win.c)
     add_executable(videodec-test EXCLUDE_FROM_ALL ../tests/test_videodec.c ../src/compat_win.c)
@@ -326,9 +326,6 @@ target_link_libraries(frame-capture-test PRIVATE Vulkan::Headers fmt::fmt Boost:
 add_executable(lighting-test-knob-test EXCLUDE_FROM_ALL ../tests/test_lighting_test.cpp)
 target_compile_options(lighting-test-knob-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(lighting-test-knob-test PRIVATE shadps4)
-add_executable(movie-bars-test EXCLUDE_FROM_ALL ../tests/test_movie_bars.cpp)
-target_compile_options(movie-bars-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-target_include_directories(movie-bars-test PRIVATE shadps4)
 add_executable(amd-paths-test EXCLUDE_FROM_ALL ../tests/test_amd_paths.cpp)
 target_compile_options(amd-paths-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(amd-paths-test PRIVATE shadps4)

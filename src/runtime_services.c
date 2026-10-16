@@ -20,7 +20,6 @@
 #endif
 
 #define USER_ID 1
-#define USER_NAME "Player"
 #define ORBIS_OK 0
 #define USER_INVALID_ARGUMENT ((int32_t)0x80960005)
 #define USER_NO_EVENT ((int32_t)0x80960007)
@@ -57,8 +56,9 @@ static ABI int32_t user_list(int32_t *ids) {
 }
 static ABI int32_t user_name(int32_t id,char *name,uint64_t size) {
     if (id!=USER_ID || !name) return USER_INVALID_ARGUMENT;
-    if (sizeof USER_NAME>size) return (int32_t)0x8096000a; /* BUFFER_TOO_SHORT */
-    strcpy(name,USER_NAME); return 0;
+    const char *value=getenv("ORDER1886_USER_NAME") ? getenv("ORDER1886_USER_NAME") : "Hunter";
+    if (strlen(value)+1>size) return (int32_t)0x8096000a; /* BUFFER_TOO_SHORT */
+    strcpy(name,value); return 0;
 }
 static ABI int32_t user_event(int32_t *event) {
     if (!event) return USER_INVALID_ARGUMENT;
@@ -71,7 +71,7 @@ static ABI int32_t user_event(int32_t *event) {
 }
 
 /* ---- SystemService ---- */
-static int language(void) { const char *v=getenv("GOW3_LANGUAGE"); return v ? atoi(v) : 1; }
+static int language(void) { const char *v=getenv("ORDER1886_LANGUAGE"); return v ? atoi(v) : 1; }
 static ABI int32_t system_param(int32_t id,int32_t *value) {
     if (!value) return SYSTEM_PARAMETER;
     switch (id) {
@@ -404,11 +404,12 @@ static ABI int32_t ime_init(const ImeParam *param, const void *extended) {
     char initial[512], prompt[256];
     utf16_to_utf8(param->buffer,param->max_length,initial,sizeof(initial));
     utf16_to_utf8(param->title,128,prompt,sizeof(prompt));
-    const char *preset=getenv("GOW3_IME_TEXT");
+    const char *preset=getenv("ORDER1886_IME_TEXT");
     if (preset) { ime_complete(0,preset); return 0; }
-    /* An empty field starts with the user name: a controller alone can accept it (the port
-     * has no on-screen keyboard). */
-    const char *start=initial[0] ? initial : USER_NAME;
+    /* An empty field starts with the player name (launcher) or "Hunter": a controller alone
+     * can accept it (the port has no on-screen keyboard). */
+    const char *name=getenv("ORDER1886_USER_NAME");
+    const char *start=initial[0] ? initial : name && *name ? name : "Hunter";
     if (!gow3gpu_text_input_begin(start,prompt[0] ? prompt : "Text")) ime_complete(0,start);
     else printf("Runtime: ImeDialog opened: shown on screen; keyboard Enter or Cross accepts, Esc or Circle cancels\n");
     return 0;
@@ -522,6 +523,85 @@ static ABI int32_t playgo_close(int32_t handle) {
     playgo_handle=0; return 0;
 }
 static ABI int32_t playgo_terminate(void) { playgo_handle=0; return 0; }
+static ABI int32_t playgo_eta(int32_t handle,const uint16_t *ids,uint32_t count,uint64_t *eta) {
+    fprintf(stderr,"Runtime: scePlayGoGetEta(handle=%d,count=%u)\n",handle,count);
+    if (handle!=playgo_handle || !handle) return PLAYGO_BAD_HANDLE;
+    if (!ids || !eta) return PLAYGO_BAD_POINTER;
+    if (!count) return PLAYGO_BAD_SIZE;
+    for (uint32_t i=0;i<count;++i) if (ids[i]>=playgo_chunks) return PLAYGO_BAD_CHUNK;
+    *eta=0; return 0; /* everything installed: no wait */
+}
+static ABI int32_t playgo_prefetch(int32_t handle,const uint16_t *ids,uint32_t count,int32_t locus) {
+    (void)locus;
+    fprintf(stderr,"Runtime: scePlayGoPrefetch(handle=%d,count=%u)\n",handle,count);
+    if (handle!=playgo_handle || !handle) return PLAYGO_BAD_HANDLE;
+    if (!ids) return PLAYGO_BAD_POINTER;
+    if (!count) return PLAYGO_BAD_SIZE;
+    return 0;
+}
+
+/* ---- ScreenShot / VideoRecording: sharing services do not exist offline ---- */
+static ABI int32_t screenshot_enable(void) { return 0; }
+static ABI int32_t screenshot_disable(void) { return 0; }
+static ABI int32_t videorecording_setinfo(int32_t what,const void *info,uint64_t size) {
+    (void)what; (void)info; (void)size; return 0;
+}
+
+/* ---- MsgDialog progress text (Order 1886) ---- */
+static ABI int32_t msg_progress_msg(uint32_t target,const char *msg) {
+    (void)msg; return dialog_progress(1,target);
+}
+
+/* ---- ImeKeyboard: no on-screen keyboard; open tracks state, update is quiet ---- */
+#define IME_NOT_OPENED ((int32_t)0x80BC0002)
+#define IME_CONNECTION_FAILED ((int32_t)0x80BC0004)
+#define IME_INVALID_HANDLER ((int32_t)0x80BC0022)
+#define IME_INVALID_ADDRESS ((int32_t)0x80BC0031)
+/* OrbisImeKeyboardResourceIdArray: u32 user id + 5 resource ids. Mirrors
+ * shadPS4: with no physical keyboard attached the array is zeroed and the
+ * call reports CONNECTION_FAILED (an OK + empty list takes a broken path). */
+static int ime_keyboard_open;
+static ABI int32_t ime_keyboard_open_fn(int32_t user,const void *param) {
+    (void)user;
+    if (!param) return IME_INVALID_ADDRESS;
+    uint64_t handler; memcpy(&handler,(const char *)param+16,8);
+    if (!handler) return IME_INVALID_HANDLER;
+    ime_keyboard_open=1;
+    fprintf(stderr,"Runtime: sceImeKeyboardOpen\n"); return 0;
+}
+static ABI int32_t ime_keyboard_close_fn(int32_t user) {
+    (void)user; ime_keyboard_open=0;
+    fprintf(stderr,"Runtime: sceImeKeyboardClose\n"); return 0;
+}
+static ABI int32_t ime_keyboard_resource(int32_t user,void *array) {
+    if (!array) return IME_INVALID_ADDRESS;
+    uint32_t *out=array;
+    out[0]=(uint32_t)user; out[1]=out[2]=out[3]=out[4]=out[5]=0;
+    fprintf(stderr,"Runtime: sceImeKeyboardGetResourceId -> no keyboard\n");
+    return ime_keyboard_open ? IME_CONNECTION_FAILED : IME_NOT_OPENED;
+}
+static ABI int32_t ime_keyboard_update(void *handler) {
+    (void)handler;
+    fprintf(stderr,"Runtime: sceImeUpdate\n");
+    return ime_keyboard_open ? 0 : IME_NOT_OPENED;
+}
+
+/* ---- AppContent add-on content: this port ships no DLC ---- */
+#define APPCONTENT_PARAMETER ((int32_t)0x80D90002)
+#define APPCONTENT_NOT_FOUND ((int32_t)0x80D90005)
+static ABI int32_t appcontent_mount(uint32_t label,const void *entitlement,void *mount) {
+    (void)label; (void)entitlement; (void)mount;
+    fprintf(stderr,"Runtime: sceAppContentAddcontMount -> NOT_FOUND (no DLC)\n");
+    return APPCONTENT_NOT_FOUND;
+}
+static ABI int32_t appcontent_unmount(void) {
+    fprintf(stderr,"Runtime: sceAppContentAddcontUnmount\n"); return 0;
+}
+static ABI int32_t appcontent_entitlement(uint32_t label,const void *entitlement,void *key) {
+    fprintf(stderr,"Runtime: sceAppContentGetEntitlementKey\n");
+    if (!entitlement || !key) return APPCONTENT_PARAMETER;
+    (void)label; return APPCONTENT_NOT_FOUND;
+}
 
 /* ---- DiscMap: the game is fully installed, no disc bitmap exists ---- */
 #define DISC_MAP_NO_BITMAP ((int32_t)0x81100004)
@@ -642,6 +722,7 @@ static const RuntimeExport exports[]={
     {"sceMsgDialogInitialize",msg_init}, {"sceMsgDialogOpen",msg_open},
     {"sceMsgDialogUpdateStatus",msg_status}, {"sceMsgDialogTerminate",msg_term},
     {"sceMsgDialogClose",msg_close}, {"sceMsgDialogProgressBarSetValue",msg_progress},
+    {"sceMsgDialogProgressBarSetMsg",msg_progress_msg},
     {"sceMsgDialogGetResult",msg_result}, {"sceMsgDialogGetStatus",msg_status},
     {"sceSaveDataDialogInitialize",save_init}, {"sceSaveDataDialogOpen",save_open},
     {"sceSaveDataDialogUpdateStatus",save_status}, {"sceSaveDataDialogTerminate",save_term},
@@ -655,6 +736,8 @@ static const RuntimeExport exports[]={
     {"sceNpCommerceDialogUpdateStatus",commerce_status}, {"sceNpCommerceDialogTerminate",commerce_term},
     {"sceImeDialogInit",ime_init}, {"sceImeDialogGetStatus",ime_status}, {"sceImeDialogGetResult",ime_result},
     {"sceImeDialogTerm",ime_term}, {"sceImeDialogAbort",ime_term},
+    {"sceImeKeyboardOpen",ime_keyboard_open_fn}, {"sceImeKeyboardClose",ime_keyboard_close_fn},
+    {"sceImeKeyboardGetResourceId",ime_keyboard_resource}, {"sceImeUpdate",ime_keyboard_update},
     {"sceNpTrophyCreateContext",trophy_context}, {"sceNpTrophyCreateHandle",trophy_handle},
     {"sceNpTrophyRegisterContext",trophy_register}, {"sceNpTrophyUnlockTrophy",trophy_unlock},
     {"sceNpTrophyGetGameInfo",trophy_game_info}, {"sceNpTrophyGetTrophyInfo",trophy_info},
@@ -664,6 +747,11 @@ static const RuntimeExport exports[]={
     {"scePlayGoGetLocus",playgo_locus}, {"scePlayGoSetInstallSpeed",playgo_speed},
     {"scePlayGoGetInstallSpeed",playgo_get_speed}, {"scePlayGoGetProgress",playgo_progress},
     {"scePlayGoSetToDoList",playgo_todo}, {"scePlayGoClose",playgo_close}, {"scePlayGoTerminate",playgo_terminate},
+    {"scePlayGoGetEta",playgo_eta}, {"scePlayGoPrefetch",playgo_prefetch},
+    {"sceScreenShotEnable",screenshot_enable}, {"sceScreenShotDisable",screenshot_disable},
+    {"sceVideoRecordingSetInfo",videorecording_setinfo},
+    {"sceAppContentAddcontMount",appcontent_mount}, {"sceAppContentAddcontUnmount",appcontent_unmount},
+    {"sceAppContentGetEntitlementKey",appcontent_entitlement},
     {"sceMouseInit",ok_void}, {"sceMouseOpen",mouse_open}, {"sceMouseRead",mouse_read}, {"sceMouseClose",mouse_close},
     {"sceAudioInOpen",audio_in_open},
     {"sceDiscMapIsRequestOnHDD",discmap_on_hdd}, {"sceDiscMap_8A828CAEE7EDD5E9",discmap_8a82},

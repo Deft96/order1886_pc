@@ -14,6 +14,7 @@
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
 #include "video_core/amdgpu/resource.h"
+#include "core/emulator_settings.h"
 
 namespace Shader::Optimization {
 namespace {
@@ -199,8 +200,12 @@ void PatchBufferSharp(const ResourceDiscovery& resource, Info& info, Descriptors
                       const Profile& profile) {
     IR::Inst& inst = *resource.user;
 
+    // ORDER1886 (082d6ae): load_mask==0 = todos os dwords do V# são immediates (inline).
+    const auto sharp_fetch = ConstructSharpFetch<AmdGpu::Buffer>(resource.sharps[0]);
+    const bool inline_cbuf = sharp_fetch.load_mask == 0;
+
     const u32 buffer_binding = descriptors.Add(BufferResource{
-        .sharp_fetch = ConstructSharpFetch<AmdGpu::Buffer>(resource.sharps[0]),
+        .sharp_fetch = sharp_fetch,
         .used_types = BufferDataType(inst, profile),
         .buffer_type = BufferType::Guest,
         .is_written = IsBufferStore(inst),
@@ -208,6 +213,7 @@ void PatchBufferSharp(const ResourceDiscovery& resource, Info& info, Descriptors
                         inst.GetOpcode() == IR::Opcode::StoreBufferFormatF32,
         .post_op = resource.sharps[0].post_op,
         .post_op_dw1_mask = resource.sharps[0].post_op_data.dw1_mask,
+        .inline_cbuf = inline_cbuf,
     });
 
     // Replace handle with binding index in buffer resource list.
@@ -555,6 +561,28 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
     const u32 mask = (1 << shift) - 1;
     const IR::U32 soffset = IR::GetBufferSOffsetArg(&inst);
 
+    // ORDER1886 (b30a794): addr64 — o par VGPR é um byte offset de 64 bits da base do
+    // buffer (stride ignorado neste modo; os valores já são offsets em bytes).
+    if (inst_info.addr64) {
+        const IR::U32 addr_lo = IR::GetBufferIndexArg(&inst);    // comp 0 = addr_lo
+        const IR::U32 addr_hi = IR::GetBufferVOffsetArg(&inst);  // comp 1 = addr_hi
+
+        // Soma soffset + inst_offset no endereço de 64 bits via IAddCarry (OpIAddCarry).
+        IR::U32 offset = ir.Imm32(inst_offset);
+        if (!soffset.IsImmediate() || soffset.U32() != 0) {
+            offset = ir.IAdd(offset, soffset);
+        }
+        IR::Value sum_carry = ir.IAddCarry(addr_lo, offset);
+        IR::U32 byte_lo = IR::U32{ir.CompositeExtract(sum_carry, 0)};
+        IR::U32 carry = IR::U32{ir.CompositeExtract(sum_carry, 1)};
+        IR::U32 byte_hi = ir.IAdd(addr_hi, carry);
+
+        // Byte offset → índice dword: (byte_hi << (32-shift)) | (byte_lo >> shift).
+        IR::U32 dword_lo = ir.ShiftRightLogical(byte_lo, ir.Imm32(shift));
+        IR::U32 dword_hi = ir.ShiftLeftLogical(byte_hi, ir.Imm32(32 - shift));
+        return ir.BitwiseOr(dword_lo, dword_hi);
+    }
+
     // If address calculation is of the form "index * const_stride + offset" with offset constant
     // and both const_stride and offset are divisible with the element size, apply shift directly.
     if (inst_info.index_enable && !inst_info.voffset_enable && soffset.IsImmediate() &&
@@ -619,6 +647,112 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
     return buffer_offset;
 }
 
+// ORDER1886 (082d6ae): soma 64-bit {base_hi, base_lo} + addend (zero-estendido de 32 bits).
+// Retorna CompositeConstructU32x2(result_lo, result_hi).
+static IR::Value EmitAdd64(IR::IREmitter& ir, const IR::U32& base_lo, const IR::U32& base_hi,
+                           const IR::U32& addend) {
+    const IR::Value sum_carry = ir.IAddCarry(base_lo, addend);
+    const IR::U32 result_lo{ir.CompositeExtract(sum_carry, 0)};
+    const IR::U32 carry{ir.CompositeExtract(sum_carry, 1)};
+    const IR::U32 result_hi = ir.IAdd(base_hi, carry);
+    return ir.CompositeConstruct(result_lo, result_hi);
+}
+
+// Número de dwords de um buffer load suportado; 0 = não suportado.
+static u32 BufferLoadNumDwords(IR::Opcode op) {
+    switch (op) {
+    case IR::Opcode::LoadBufferU32:
+    case IR::Opcode::LoadBufferF32:
+        return 1;
+    case IR::Opcode::LoadBufferU32x2:
+    case IR::Opcode::LoadBufferF32x2:
+        return 2;
+    case IR::Opcode::LoadBufferU32x3:
+    case IR::Opcode::LoadBufferF32x3:
+        return 3;
+    case IR::Opcode::LoadBufferU32x4:
+    case IR::Opcode::LoadBufferF32x4:
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+// ORDER1886 (082d6ae): troca um buffer load com V# inline por ReadConst via BDA page table.
+static bool PatchInlineBuffer(IR::Block& block, IR::Inst& inst, Info& info,
+                              const BufferResource& buffer_res) {
+    const u32 num_dwords = BufferLoadNumDwords(inst.GetOpcode());
+    if (num_dwords == 0) {
+        return false;
+    }
+
+    if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
+        LOG_ERROR(Render_Recompiler,
+                  "Inline V# buffer load at {:#x} requires DMA but DMA disabled",
+                  info.pgm_hash);
+        return false;
+    }
+
+    const auto buffer = buffer_res.GetSharp(info);
+    if (buffer.swizzle_enable || buffer.add_tid_enable) {
+        return false;
+    }
+
+    IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
+    const auto inst_info = inst.Flags<IR::BufferInstInfo>();
+    const u32 inst_offset = inst_info.inst_offset.Value();
+
+    IR::Value guest_addr;
+    if (inst_info.addr64) {
+        const IR::U32 addr_lo = IR::GetBufferIndexArg(&inst);
+        const IR::U32 addr_hi = IR::GetBufferVOffsetArg(&inst);
+        const IR::U32 soffset = IR::GetBufferSOffsetArg(&inst);
+
+        IR::U32 soffset_plus_offset = ir.Imm32(inst_offset);
+        if (!soffset.IsImmediate() || soffset.U32() != 0) {
+            soffset_plus_offset = ir.IAdd(soffset_plus_offset, soffset);
+        }
+        guest_addr = EmitAdd64(ir, addr_lo, addr_hi, soffset_plus_offset);
+    } else {
+        const u64 vsharp_base = buffer.base_address;
+        const u32 base_lo = static_cast<u32>(vsharp_base);
+        const u32 base_hi = static_cast<u32>(vsharp_base >> 32);
+        const u32 stride = buffer.stride;
+
+        IR::U32 index = ir.Imm32(0);
+        if (inst_info.index_enable) {
+            index = IR::GetBufferIndexArg(&inst);
+        }
+        IR::U32 voffset = ir.Imm32(0);
+        if (inst_info.voffset_enable) {
+            voffset = IR::GetBufferVOffsetArg(&inst);
+        }
+        const IR::U32 soffset = IR::GetBufferSOffsetArg(&inst);
+
+        IR::U32 offset32 = ir.Imm32(inst_offset);
+        offset32 = ir.IAdd(offset32, soffset);
+        offset32 = ir.IAdd(offset32, voffset);
+        if (stride != 0 && (!index.IsImmediate() || index.U32() != 0)) {
+            offset32 = ir.IAdd(offset32, ir.IMul(index, ir.Imm32(stride)));
+        }
+        guest_addr = EmitAdd64(ir, ir.Imm32(base_lo), ir.Imm32(base_hi), offset32);
+    }
+
+    IR::Value result;
+    if (num_dwords == 1) {
+        result = ir.ReadConst(guest_addr, ir.Imm32(0));
+    } else {
+        boost::container::small_vector<IR::Value, 4> dwords;
+        for (u32 i = 0; i < num_dwords; ++i) {
+            dwords.push_back(ir.ReadConst(guest_addr, ir.Imm32(i)));
+        }
+        result = ir.CompositeConstruct(dwords);
+    }
+
+    inst.ReplaceUsesWith(result);
+    return true;
+}
+
 void PatchBufferArgs(IR::Inst& inst, Info& info) {
     const auto handle = inst.Arg(0);
     const auto buffer_res = info.buffers[handle.U32()];
@@ -627,6 +761,13 @@ void PatchBufferArgs(IR::Inst& inst, Info& info) {
     // Address of constant buffer reads can be calculated at IR emission time.
     if (inst.GetOpcode() == IR::Opcode::ReadConstBuffer) {
         return;
+    }
+
+    // ORDER1886 (082d6ae): V# inline sem backing no buffer cache vai por ReadConst/BDA.
+    if (buffer_res.inline_cbuf) {
+        if (PatchInlineBuffer(*inst.GetParent(), inst, info, buffer_res)) {
+            return;
+        }
     }
 
     IR::IREmitter ir{*inst.GetParent(), IR::Block::InstructionList::s_iterator_to(inst)};

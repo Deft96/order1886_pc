@@ -226,7 +226,7 @@ private:
     // a GPU ring timeout.
     static bool HotPagesEnabled() {
         static const bool enabled = [] {
-            const char* env = std::getenv("GOW3_HOT_PAGES");
+            const char* env = std::getenv("ORDER1886_HOT_PAGES");
             return env && env[0] == '1';
         }();
         return enabled && !Gow3Toggle::Disabled(Gow3Toggle::HotPages);

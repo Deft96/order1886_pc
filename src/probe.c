@@ -36,6 +36,45 @@ typedef struct { uint64_t target, kind, value, addend; } Reloc;
 static char (*names)[128];
 static uint64_t import_count;
 static unsigned char *image;
+#ifdef _WIN32
+/* ORDER1886_WATCH_STATE=1: host watcher thread polling the 0xa2b10 guard
+ * inputs (image+0x1681a30 pointer, image+0x1681a20 flag byte); prints on
+ * change so the boot phase that flips them is visible. ReadProcessMemory
+ * never faults on not-yet-materialized pages. */
+static DWORD WINAPI order1886_watch_state(LPVOID p) {
+    (void)p;
+    uint64_t last_ptr = 0;
+    unsigned char last_flag = 0;
+    uint64_t last_tab = 0, last_cnt = 0;
+    int first = 1, stable = 0;
+    for (;;) {
+        Sleep(200);
+        uint64_t v = 0, tab = 0, cnt = 0;
+        unsigned char f = 0;
+        SIZE_T got = 0;
+        int ok = ReadProcessMemory(GetCurrentProcess(), image + 0x1681a30, &v, 8, &got) && got == 8 &&
+                 ReadProcessMemory(GetCurrentProcess(), image + 0x1681a20, &f, 1, &got) && got == 1 &&
+                 ReadProcessMemory(GetCurrentProcess(), (LPCVOID)0x801680fc0, &tab, 8, &got) && got == 8;
+        if (ok) ok = ReadProcessMemory(GetCurrentProcess(), (LPCVOID)0x801680fc8, &cnt, 8, &got) && got == 8;
+        if (ok) {
+            if (first || v != last_ptr || f != last_flag || tab != last_tab || cnt != last_cnt) {
+                printf("Runtime: guard state ptr=%p flag=%u table=%p count=%llu\n",
+                       (void *)(uintptr_t)v, f, (void *)(uintptr_t)tab, (unsigned long long)cnt);
+                fflush(NULL);
+                last_ptr = v;
+                last_flag = f;
+                last_tab = tab;
+                last_cnt = cnt;
+                first = 0;
+                stable = 0;
+            } else if (++stable == 150) {
+                break; /* unchanged for 30s */
+            }
+        }
+    }
+    return 0;
+}
+#endif
 static size_t page_size;
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
 static LinkedModule modules[16];
@@ -45,6 +84,82 @@ static int gpu_enabled;
 static unsigned cpu_missing_sets; /* CPU_SET_* the host lacks; the guest code needs them rewritten */
 static IsaTable *isa_table; /* rewritten sites (--isa-rewrite); the fault handlers and the report read it */
 static void isa_report_hook(void) { isa_rewrite_report(isa_table, stdout); }
+/* Import call ring (GOW3_TRACE_IMPORTS=1): indices of the last resolved
+ * kind==1 imports called before a fault. Wrappers tail-call the target, so
+ * guest ABI is unchanged apart from caller-saved registers and timing. */
+#define DBG_RING 16384
+#define DBG_RET_RING 4096
+static uint64_t dbg_ring[DBG_RING];
+static uint64_t dbg_ring_head;
+static uint64_t dbg_ret_ring[DBG_RET_RING * 2];
+static uint64_t dbg_ret_head;
+static int dbg_trace;
+static ABI void dbg_log_import(uint32_t i) {
+    /* Mute the idle spin so real history survives. */
+    const char *n = names[i];
+    if ((n[0] == 'a' && n[1] == 'I') || (n[0] == 'T' && n[1] == '7')) {
+        if (!strcmp(n, "aI+OeCz8xrQ#libkernel") || !strcmp(n, "T72hz6ffq08#libkernel"))
+            return;
+    }
+    {
+        static FILE *trace_file;
+        static int trace_opened;
+        if (!trace_opened) {
+            trace_opened = 1;
+            trace_file = fopen("import_trace.log", "w");
+        }
+        if (trace_file) {
+            uint64_t tid;
+#ifdef _WIN32
+            tid = (uint64_t)GetCurrentThreadId();
+#else
+            tid = (uint64_t)(uintptr_t)pthread_self();
+#endif
+            fprintf(trace_file, "%llu %s\n", (unsigned long long)tid, runtime_import_name(n));
+            if ((dbg_ring_head & 1023) == 0) fflush(trace_file);
+        }
+    }    uint64_t tid;
+#ifdef _WIN32
+    tid = (uint64_t)GetCurrentThreadId();
+#else
+    tid = (uint64_t)(uintptr_t)pthread_self();
+#endif
+    dbg_ring[dbg_ring_head++ % DBG_RING] = (tid << 32) | i;
+}
+static ABI void dbg_log_ret(uint32_t i, uint64_t retval) {
+    uint64_t n = dbg_ret_head++ % DBG_RET_RING;
+    dbg_ret_ring[n * 2] = i;
+    dbg_ret_ring[n * 2 + 1] = retval;
+}
+static void dbg_ring_report(void) {
+    if (!dbg_trace) return;
+    uint64_t self;
+#ifdef _WIN32
+    self = (uint64_t)GetCurrentThreadId();
+#else
+    self = (uint64_t)(uintptr_t)pthread_self();
+#endif
+    uint64_t total = dbg_ring_head, start = total > DBG_RING ? total - DBG_RING : 0;
+    uint64_t shown = 0;
+    for (uint64_t n = start; n < total; ++n)
+        if ((dbg_ring[n % DBG_RING] >> 32) == self) ++shown;
+    fprintf(stderr, "Last %" PRIu64 " imports on faulting thread:\n", shown);
+    for (uint64_t n = start; n < total; ++n) {
+        uint64_t e = dbg_ring[n % DBG_RING];
+        if ((e >> 32) != self) continue;
+        uint32_t i = (uint32_t)e;
+        if (i >= import_count) continue;
+        fprintf(stderr, "  %s (%s)\n", names[i], runtime_import_name(names[i]));
+    }
+    uint64_t rtotal = dbg_ret_head, rstart = rtotal > DBG_RET_RING ? rtotal - DBG_RET_RING : 0;
+    fprintf(stderr, "Last %" PRIu64 " import returns:\n", rtotal - rstart);
+    for (uint64_t n = rstart; n < rtotal; ++n) {
+        uint32_t i = (uint32_t)dbg_ret_ring[n * 2];
+        uint64_t r = dbg_ret_ring[n * 2 + 1];
+        if (i >= import_count) continue;
+        fprintf(stderr, "  %s = 0x%llx\n", runtime_import_name(names[i]), (unsigned long long)r);
+    }
+}
 int vulkan_smoke(void);
 
 static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
@@ -152,6 +267,7 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         rbp=frame[0];
     }
     if (isa_table) isa_rewrite_report(isa_table,stderr);
+    dbg_ring_report();
     fflush(NULL);
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
@@ -564,7 +680,7 @@ void runtime_restart(void) {
     fflush(NULL);
 #ifdef _WIN32
     /* run.py sets GOW3_RESTART_COMMAND: the launch command line, started again (new patches). */
-    const char *command=getenv("GOW3_RESTART_COMMAND");
+    const char *command=getenv("ORDER1886_RESTART_COMMAND");
     puts("Runtime: restarting through run.py");
     if (!command || !*command) { fputs("runtime_restart: GOW3_RESTART_COMMAND is not set\n",stderr); _exit(1); }
     char *line=_strdup(command);
@@ -580,7 +696,7 @@ void runtime_restart(void) {
     /* The new launch waits for this process's GPU device to go away (run.py --after). */
     TerminateProcess(GetCurrentProcess(),0);
 #else
-    const char *command = getenv("GOW3_RESTART_COMMAND");
+    const char *command = getenv("ORDER1886_RESTART_COMMAND");
     syscall(SYS_close_range, 3u, ~0u, 0u);
     if (command && *command) {
         puts("Runtime: restarting through GOW3_RESTART_COMMAND");
@@ -599,7 +715,7 @@ void runtime_restart(void) {
  * in missing. */
 static int cpu_supported(char *missing, size_t size) {
     missing[0] = 0;
-    const char *check = getenv("GOW3_CPU_CHECK");
+    const char *check = getenv("ORDER1886_CPU_CHECK");
     if (check && !strcmp(check, "0")) return 1;
     const CpuFeatureWords words = cpu_feature_words();
     if (cpu_missing_fatal(words, missing, size)) {
@@ -667,7 +783,7 @@ int main(int argc, char **argv) {
     if (!cpu_supported(missing, sizeof missing)) return 20;
     if (cpu_missing_sets) printf("CPU: missing %s\n", missing);
     /* GOW3_ISA_REWRITE=0 never rewrites, =1 rewrites every site; by default the sets the CPU lacks. */
-    const char *policy = getenv("GOW3_ISA_REWRITE");
+    const char *policy = getenv("ORDER1886_ISA_REWRITE");
     unsigned isa_sets = policy && !strcmp(policy, "1") ? 0xffffffffu : policy && !strcmp(policy, "0") ? 0 : cpu_missing_sets;
     if (cpu_missing_sets && !isa_sets) {
         printf("STOP: this CPU lacks %s and the rewrite is disabled (GOW3_ISA_REWRITE=0)\n", missing);
@@ -705,18 +821,59 @@ int main(int argc, char **argv) {
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);
         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))
             runtime_savedata_configure(id);
+        /* ORDER1886: defaults do jogo para o usuário final (as env vars podem sobrescrever):
+         * - a luz exige o DMA (o inline V# via BDA page table);
+         * - o threading pesado crasha o driver AMD (device lost) — desliga por padrão
+         *   (o usuário pode religar com GOW3_TOGGLE_FILE=0). */
+        if (!strcmp(id, "CUSA00035")) {
+            if (!getenv("ORDER1886_DIRECT_MEMORY_ACCESS")) {
+                _putenv_s("ORDER1886_DIRECT_MEMORY_ACCESS", "1");
+            }
+            if (!getenv("ORDER1886")) {
+                _putenv_s("ORDER1886", "1");
+            }
+            // ORDER1886: os defaults de LANÇAMENTO (a config da run231 — o TESTD do DrawPipe
+            // nodispatch + o combo que deu a melhor performance; o usuário pode sobrescrever).
+            if (!getenv("ORDER1886_FULL_BARRIERS")) {
+                _putenv_s("ORDER1886_FULL_BARRIERS", "1");
+            }
+            if (!getenv("ORDER1886_DEFERRED_READBACK")) {
+                _putenv_s("ORDER1886_DEFERRED_READBACK", "1");
+            }
+            if (!getenv("ORDER1886_PARALLEL_WARMUP")) {
+                _putenv_s("ORDER1886_PARALLEL_WARMUP", "1");
+            }
+            if (!getenv("ORDER1886_BACKGROUND_WARMUP")) {
+                _putenv_s("ORDER1886_BACKGROUND_WARMUP", "1");
+            }
+            if (!getenv("ORDER1886_PIPELINE_BINARIES")) {
+                _putenv_s("ORDER1886_PIPELINE_BINARIES", "1");
+            }
+            if (!getenv("ORDER1886_READBACK_LINEAR")) {
+                _putenv_s("ORDER1886_READBACK_LINEAR", "1");
+            }
+            if (!getenv("ORDER1886_TOGGLE_FILE")) {
+                static const char toggles_path[] = "user/order1886_toggles.txt";
+                FILE* tf = fopen(toggles_path, "wb");
+                if (tf) {
+                    fputs("1099511627776", tf); /* o TESTD da run231 (o vencedor) */
+                    fclose(tf);
+                    _putenv_s("ORDER1886_TOGGLE_FILE", toggles_path);
+                }
+            }
+        }
     }
     gow3gpu_register_kernel();
 #ifdef _WIN32
     SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
     AddVectoredExceptionHandler(1, vectored_fault);
     SetUnhandledExceptionFilter(unhandled_fault);
-    if (getenv("GOW3_STRICT_HANDLES")) {
+    if (getenv("ORDER1886_STRICT_HANDLES")) {
         PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY strict={0};
         strict.RaiseExceptionOnInvalidHandleReference=1;
         strict.HandleExceptionsPermanentlyEnabled=1;
         if (!SetProcessMitigationPolicy(ProcessStrictHandleCheckPolicy,&strict,sizeof(strict)))
-            fprintf(stderr,"GOW3_STRICT_HANDLES: policy not set (%lu)\n",GetLastError());
+            fprintf(stderr,"ORDER1886_STRICT_HANDLES: policy not set (%lu)\n",GetLastError());
     }
     (void)timeout_seconds; /* no watchdog on Windows */
 #else
@@ -870,6 +1027,14 @@ int main(int argc, char **argv) {
         t[8] = 0x48; t[9] = 0xb8; memcpy(t + 10, &handler, 8);
         t[18] = 0xff; t[19] = 0xe0;
     }
+    dbg_trace = getenv("ORDER1886_TRACE_IMPORTS") != NULL;
+    uintptr_t *istubs = NULL;
+    unsigned char *iwrap = NULL;
+    if (dbg_trace && import_count) {
+        istubs = calloc(import_count, sizeof(*istubs));
+        iwrap = allocate(round_page(import_count * 192));
+        if (!istubs || !iwrap) fail("allocation failed");
+    }
     for (uint64_t i = 0; i < nr; ++i) {
         uintptr_t value = relocs[i].kind == 2 ? (uintptr_t)(data_traps + page_size * relocs[i].value + relocs[i].addend)
                         : relocs[i].kind == 1 ? (uintptr_t)(traps + 32 * relocs[i].value)
@@ -882,9 +1047,64 @@ int main(int argc, char **argv) {
                 if (binding_kinds[relocs[i].value]!=relocs[i].kind || !mapped(segments,ns,address,relocs[i].addend+1)) fail("native export kind/range mismatch");
                 value=(uintptr_t)image+address+relocs[i].addend;
             }
+            if (iwrap && relocs[i].kind == 1 &&
+                value != (uintptr_t)(traps + 32 * relocs[i].value)) {
+                /* Resolved call: log the import, call the target, log rax, return.
+                 * All argument registers (GPR + XMM) are saved around the
+                 * logger calls; SysV stack alignment is preserved throughout:
+                 * push rax/rdi/rsi/rdx/rcx/r8/r9; sub rsp,96;
+                 * movdqu [rsp+i*16],xmm0-5; mov edi,index;
+                 * movabs r11,logger; call r11; movdqu xmm0-5,[rsp+i*16];
+                 * add rsp,96; pop r9/r8/rcx/rdx/rsi/rdi/rax;
+                 * movabs r11,target; sub rsp,8; call r11; add rsp,8;
+                 * mov rsi,rax; push rax; mov edi,index;
+                 * movabs r11,logret; call r11; pop rax; ret (pad to 192). */
+                uint32_t idx = (uint32_t)relocs[i].value;
+                if (!istubs[idx]) {
+                    if (getenv("ORDER1886_TRACE_IMPORTS") && (!strcmp(names[idx],"FxVZqBAA7ks#libkernel") || !strcmp(names[idx],"YQ0navp+YIc#libc")))
+                        fprintf(stderr,"Runtime: wrap %s -> target %p\n",names[idx],(void *)value);
+                    unsigned char *s = iwrap + (uintptr_t)idx * 192, *p = s;
+                    *p++ = 0x50; *p++ = 0x57; *p++ = 0x56; *p++ = 0x52;
+                    *p++ = 0x51; *p++ = 0x41; *p++ = 0x50; *p++ = 0x41; *p++ = 0x51;
+                    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x60;
+                    for (int r = 0; r < 6; ++r) {
+                        *p++ = 0xF3; *p++ = 0x0F; *p++ = 0x7F;
+                        *p++ = (unsigned char)(0x44 + r * 8); *p++ = 0x24;
+                        *p++ = (unsigned char)(r * 16);
+                    }
+                    *p++ = 0xBF; memcpy(p, &idx, 4); p += 4;
+                    *p++ = 0x49; *p++ = 0xBB;
+                    { uintptr_t f = (uintptr_t)dbg_log_import; memcpy(p, &f, 8); p += 8; }
+                    *p++ = 0x41; *p++ = 0xFF; *p++ = 0xD3;
+                    for (int r = 5; r >= 0; --r) {
+                        *p++ = 0xF3; *p++ = 0x0F; *p++ = 0x6F;
+                        *p++ = (unsigned char)(0x44 + r * 8); *p++ = 0x24;
+                        *p++ = (unsigned char)(r * 16);
+                    }
+                    *p++ = 0x48; *p++ = 0x83; *p++ = 0xC4; *p++ = 0x60;
+                    *p++ = 0x41; *p++ = 0x59; *p++ = 0x41; *p++ = 0x58;
+                    *p++ = 0x59; *p++ = 0x5A; *p++ = 0x5E; *p++ = 0x5F; *p++ = 0x58;
+                    *p++ = 0x49; *p++ = 0xBB; memcpy(p, &value, 8); p += 8;
+                    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x08;
+                    *p++ = 0x41; *p++ = 0xFF; *p++ = 0xD3;
+                    *p++ = 0x48; *p++ = 0x83; *p++ = 0xC4; *p++ = 0x08;
+                    *p++ = 0x48; *p++ = 0x89; *p++ = 0xC6;
+                    *p++ = 0x50;
+                    *p++ = 0xBF; memcpy(p, &idx, 4); p += 4;
+                    *p++ = 0x49; *p++ = 0xBB;
+                    { uintptr_t f = (uintptr_t)dbg_log_ret; memcpy(p, &f, 8); p += 8; }
+                    *p++ = 0x41; *p++ = 0xFF; *p++ = 0xD3;
+                    *p++ = 0x58;
+                    *p++ = 0xC3;
+                    memset(p, 0x90, (size_t)((s + 192) - p));
+                    istubs[idx] = (uintptr_t)s;
+                }
+                value = istubs[idx];
+            }
         }
         memcpy(image + relocs[i].target, &value, 8);
     }
+    if (iwrap) protect(iwrap, round_page(import_count * 192), 5);
     if (check_imports) {
         /* Lists every import the game would stop at, without running it (needs the GPU
          * library: without --cpu-only its symbols are registered above). */
@@ -904,6 +1124,15 @@ int main(int argc, char **argv) {
         _exit(missing ? 1 : 0); /* no destructors: GPU threads are running */
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
+    /* ORDER1886_FORCE_CHECK=1: diagnostic only; forces the 0xaffb0 system
+     * check past its `cmp $2,%eax; jne error` (image+0xaffd6, 6 bytes) so a
+     * boot can show what lies beyond the fork. Never ship this. */
+    if (getenv("ORDER1886_FORCE_CHECK") && size == 24512608 &&
+        image[0xaffd3] == 0x83 && image[0xaffd4] == 0xf8 && image[0xaffd5] == 0x02 &&
+        image[0xaffd6] == 0x0f && image[0xaffd7] == 0x85) {
+        memset(image + 0xaffd6, 0x90, 6);
+        printf("Runtime: ORDER1886_FORCE_CHECK applied (check forced to pass)\n");
+    }
     if (gpu_enabled) install_orb_multiplier(segments, ns, size);
     if (gpu_enabled) install_cheats(segments, ns, size);
     if (gpu_enabled) install_actor_watch(segments, ns, size);
@@ -956,6 +1185,13 @@ int main(int argc, char **argv) {
         }
     }
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
+#ifdef _WIN32
+    printf("Runtime: main thread tid=%lu\n", GetCurrentThreadId());
+    if (getenv("ORDER1886_WATCH_STATE")) {
+        HANDLE wt = CreateThread(NULL, 0, order1886_watch_state, NULL, 0, NULL);
+        if (wt) CloseHandle(wt);
+    }
+#endif
     entered_game=1;
     struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};
 #ifdef _WIN32

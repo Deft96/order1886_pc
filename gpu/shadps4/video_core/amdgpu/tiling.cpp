@@ -6,6 +6,8 @@
 
 #include <magic_enum/magic_enum.hpp>
 
+#include <cstdio>
+
 namespace AmdGpu {
 
 static constexpr u32 MICROTILE_SIZE = 8;
@@ -60,6 +62,14 @@ ArrayMode GetArrayMode(TileMode tile_mode) {
         return ArrayMode::ArrayLinearAligned;
     case TileMode::DisplayLinearGeneral:
         return ArrayMode::ArrayLinearGeneral;
+    case static_cast<TileMode>(27): // ORDER1886: 27 = 3D Thin1 (si_tile_mode_table do Mesa)
+        return ArrayMode::Array3DTiledThin1;
+    case static_cast<TileMode>(28): // ORDER1886: 28 = 3D Thick
+        return ArrayMode::Array3DTiledThick;
+    case static_cast<TileMode>(29): // ORDER1886: 29 = 3D XThick (tabela si_tile_mode_table
+        return ArrayMode::Array3DTiledXThick; // do Mesa/radeonsi; textura volumétrica do jogo)
+    case static_cast<TileMode>(30): // ORDER1886: 30 = PRT 3D Thick
+        return ArrayMode::ArrayPrt3DTiledThick;
     default:
         UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
     }
@@ -99,6 +109,14 @@ MicroTileMode GetMicroTileMode(TileMode tile_mode) {
     case TileMode::Thick2DXThick:
     case TileMode::Thick3DXThick:
         return MicroTileMode::Thick;
+    case static_cast<TileMode>(27): // ORDER1886: como Thin3DThin
+        return MicroTileMode::Thin;
+    case static_cast<TileMode>(28): // ORDER1886: como Thick3DThick
+        return MicroTileMode::Thick;
+    case static_cast<TileMode>(29): // ORDER1886: como Thick3DXThick
+        return MicroTileMode::Thick;
+    case static_cast<TileMode>(30): // ORDER1886: como Thick3DThickPrt
+        return MicroTileMode::Thick;
     default:
         UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
     }
@@ -137,6 +155,11 @@ PipeConfig GetPipeConfig(TileMode tile_mode) {
         return PipeConfig::P8_32x32_8x16;
     case TileMode::DisplayLinearGeneral:
         return PipeConfig::P2;
+    case static_cast<TileMode>(27): // ORDER1886: como Thin3DThin (3D usa 8x16)
+    case static_cast<TileMode>(28): // ORDER1886: como Thick3DThick
+    case static_cast<TileMode>(29): // ORDER1886: como Thick3DXThick (3D usa 8x16)
+    case static_cast<TileMode>(30): // ORDER1886: como Thick3DThickPrt
+        return PipeConfig::P8_32x32_8x16;
     default:
         UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
     }
@@ -174,6 +197,11 @@ PipeConfig GetAltPipeConfig(TileMode tile_mode) {
         return PipeConfig::P16_32x32_8x16;
     case TileMode::DisplayLinearGeneral:
         return PipeConfig::P2;
+    case static_cast<TileMode>(27): // ORDER1886: como Thin3DThin
+    case static_cast<TileMode>(28): // ORDER1886: como Thick3DThick
+    case static_cast<TileMode>(29): // ORDER1886: como Thick3DXThick
+    case static_cast<TileMode>(30): // ORDER1886: como Thick3DThickPrt
+        return PipeConfig::P16_32x32_8x16;
     default:
         UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
     }
@@ -211,6 +239,12 @@ u32 GetSampleSplit(TileMode tile_mode) {
     case TileMode::Thin2DThinPrt:
     case TileMode::Thin3DThinPrt:
         return 2;
+    case static_cast<TileMode>(27): // ORDER1886: como Thin3DThin (thin usa 2)
+        return 2;
+    case static_cast<TileMode>(28): // ORDER1886: como Thick3DThick
+    case static_cast<TileMode>(29): // ORDER1886: como Thick3DXThick (thick usa 1)
+    case static_cast<TileMode>(30): // ORDER1886: como Thick3DThickPrt
+        return 1;
     default:
         UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
     }
@@ -251,6 +285,11 @@ u32 GetTileSplitHw(TileMode tile_mode) {
     case TileMode::Depth2DThin1K:
     case TileMode::Depth2DThinPrt1K:
         return 1024;
+    case static_cast<TileMode>(27): // ORDER1886: como Thin3DThin
+    case static_cast<TileMode>(28): // ORDER1886: como Thick3DThick
+    case static_cast<TileMode>(29): // ORDER1886: como Thick3DXThick
+    case static_cast<TileMode>(30): // ORDER1886: como Thick3DThickPrt
+        return 64;
     default:
         UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
     }

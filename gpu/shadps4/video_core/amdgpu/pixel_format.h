@@ -356,7 +356,8 @@ constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
         case DataFormat::Format16_16_16_16:
             return NumberConversion::Sint16ToSnormNz;
         default:
-            UNREACHABLE_MSG("data_fmt = {}", u32(data_fmt));
+            // ORDER1886: T# de lixo com data_fmt reservado (ex: 28); nunca crashar.
+            return NumberConversion::None;
         }
     }
     default:

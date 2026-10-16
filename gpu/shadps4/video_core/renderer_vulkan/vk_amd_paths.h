@@ -72,7 +72,7 @@ inline std::string Marker(Flags flags) {
 /// GOW3_AMD_PATHS_OFF, read once; the marker goes to stdout (last_run.log) the first time.
 inline Flags Current() {
     static const Flags flags = [] {
-        const Flags parsed = Parse(std::getenv("GOW3_AMD_PATHS_OFF"));
+        const Flags parsed = Parse(std::getenv("ORDER1886_AMD_PATHS_OFF"));
         if (parsed.Any()) {
             std::printf("%s\n", Marker(parsed).c_str());
         }

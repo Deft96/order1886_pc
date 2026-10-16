@@ -9,15 +9,14 @@
 #include <cstring>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace Gow3Settings {
 
 namespace {
 
 const char* Path() {
-    const char* env = std::getenv("GOW3_CONFIG");
-    return env && env[0] ? env : "gow3.ini";
+    const char* env = std::getenv("ORDER1886_CONFIG");
+    return env && env[0] ? env : "order1886.ini";
 }
 
 float Clamp(float v, float lo, float hi) {
@@ -118,10 +117,6 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.deferred_readback = i != 0;
     } else if (key == "stale_readback") {
         v.stale_readback = i != 0;
-    } else if (key == "anisotropy") {
-        v.anisotropy = Gow3Graphics::ParseAnisotropy(i);
-    } else if (key == "vibration") {
-        v.vibration = value.empty() ? 100 : std::clamp(i, 0, 100);
     } else if (key == "restart_unconfirmed") {
         v.restart_unconfirmed = i != 0;
     } else if (key == "enemy_health_bar") {
@@ -177,21 +172,21 @@ void Load() {
         std::printf("Settings: %s\n", Path());
     }
     // Environment overrides (scripts, A/B tests).
-    if (const char* env = std::getenv("GOW3_UPSCALER")) {
+    if (const char* env = std::getenv("ORDER1886_UPSCALER")) {
         v.upscaler = UpscalerOff;
         for (int u = 0; u < UpscalerCount; ++u) {
             if (std::strcmp(env, UpscalerName(u)) == 0) v.upscaler = u;
         }
     }
     const std::pair<const char*, const char*> env_keys[] = {
-        {"GOW3_FSR_SHARPNESS", "sharpness"},        {"GOW3_JITTER", "jitter"},
-        {"GOW3_REACTIVE", "reactive"},              {"GOW3_REACTIVE_SCALE", "reactive_scale"},
-        {"GOW3_REACTIVE_THRESHOLD", "reactive_threshold"}, {"GOW3_REACTIVE_MAX", "reactive_max"},
-        {"GOW3_UPSCALE_PRESET", "preset"},            {"GOW3_OBJECT_MOTION", "object_motion"},
-        {"GOW3_ASYNC_SHADERS", "async_shaders"},      {"GOW3_DEFERRED_READBACK", "deferred_readback"},
-        {"GOW3_STALE_READBACK", "stale_readback"},     {"GOW3_FSR1", "fsr1"},
-        {"GOW3_RCAS", "rcas"},                        {"GOW3_FRAMES_AHEAD", "frames_queued"},
-        {"GOW3_ANISOTROPY", "anisotropy"},            {"GOW3_VIBRATION", "vibration"},
+        {"ORDER1886_FSR_SHARPNESS", "sharpness"},        {"ORDER1886_JITTER", "jitter"},
+        {"ORDER1886_REACTIVE", "reactive"},              {"ORDER1886_REACTIVE_SCALE", "reactive_scale"},
+        {"ORDER1886_REACTIVE_THRESHOLD", "reactive_threshold"}, {"ORDER1886_REACTIVE_MAX", "reactive_max"},
+        {"ORDER1886_UPSCALE_PRESET", "preset"},            {"ORDER1886_OBJECT_MOTION", "object_motion"},
+        {"ORDER1886_ASYNC_SHADERS", "async_shaders"},      {"ORDER1886_DEFERRED_READBACK", "deferred_readback"},
+        {"ORDER1886_STALE_READBACK", "stale_readback"},     {"ORDER1886_FSR1", "fsr1"},
+        {"ORDER1886_RCAS", "rcas"},                        {"ORDER1886_FRAMES_AHEAD", "frames_queued"},
+        {"ORDER1886_SHOW_FPS", "show_fps"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env); value && value[0]) {
@@ -205,12 +200,11 @@ void Load() {
     v.startup_live_resolution = v.live_resolution;
     v.startup_render_resolution = v.render_resolution;
     v.startup_engine_fps = v.engine_fps;
-    const char* applied = std::getenv("GOW3_ENGINE_FPS");
+    const char* applied = std::getenv("ORDER1886_ENGINE_FPS");
     v.applied_engine_fps = applied && applied[0] ? Gow3Graphics::ParseEngineFps(std::atoi(applied))
                                                  : v.engine_fps.load();
     v.startup_deferred_readback = v.deferred_readback;
     v.startup_stale_readback = v.stale_readback;
-    v.startup_anisotropy = v.anisotropy;
 }
 
 bool GraphicsNeedRestart() {
@@ -218,8 +212,7 @@ bool GraphicsNeedRestart() {
     return v.render_resolution != v.startup_render_resolution ||
            v.engine_fps != v.startup_engine_fps ||
            v.deferred_readback != v.startup_deferred_readback ||
-           v.stale_readback != v.startup_stale_readback ||
-           v.anisotropy != v.startup_anisotropy;
+           v.stale_readback != v.startup_stale_readback;
 }
 
 void ConfigureUpscalerSupport(bool fsr4, bool fsr411) {
@@ -250,7 +243,7 @@ void ConfigureDlssSupport(bool available, const char* problem) {
 }
 
 bool FixedRenderSession() {
-    const char* size = std::getenv("GOW3_RENDER_RES");
+    const char* size = std::getenv("ORDER1886_RENDER_RES");
     return size && size[0];
 }
 
@@ -308,7 +301,6 @@ void Save() {
                  int(v.overlay_items >> 3 & 1), int(v.overlay_items >> 4 & 1), int(v.overlay_items >> 5 & 1),
                  int(v.overlay_items >> 6 & 1), v.overlay_scale.load(), v.overlay_corner.load(),
                  v.overlay_opacity.load(), v.overlay_layout.load(), v.menu_tab.load());
-    const std::vector<std::string> resolution_names = Gow3Graphics::ResolutionNames();
     std::fprintf(file,
                  "display_mode=%s\nvsync=%d\nfps_limit=%d\nasync_shaders=%d\n"
                  "fsr1=%d\nrcas=%d\nrcas_strength=%d\nframes_queued=%d\n"
@@ -317,10 +309,9 @@ void Save() {
                  Gow3Graphics::DisplayModeKeys[std::clamp(v.display_mode.load(), 0, 2)].data(),
                  int(v.vsync.load()), v.fps_limit.load(), int(v.async_shaders.load()),
                  int(v.fsr1.load()), int(v.rcas.load()), v.rcas_strength.load(), v.frames_queued.load(),
-                 resolution_names[std::clamp(v.render_resolution.load(), 0, int(resolution_names.size()) - 1)].c_str(),
+                 Gow3Graphics::Resolutions[std::clamp(v.render_resolution.load(), 0, 5)].data(),
                  v.engine_fps.load(), int(v.deferred_readback.load()), int(v.stale_readback.load()),
                  int(v.restart_unconfirmed.load()));
-    std::fprintf(file, "anisotropy=%d\nvibration=%d\n", v.anisotropy.load(), v.vibration.load());
     // Read by run.sh at start.
     std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                   : v.live_resolution ? "1" : "0");

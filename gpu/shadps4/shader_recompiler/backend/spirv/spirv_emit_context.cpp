@@ -233,14 +233,18 @@ Id EmitContext::GetBufferSize(const u32 sharp_idx) {
 }
 
 void EmitContext::DefineBufferProperties() {
-    if (!profile.needs_buffer_offsets) {
-        return;
-    }
     for (u32 i = 0; i < buffers.size(); i++) {
         auto& buffer = buffers[i];
         const auto& desc = info.buffers[i];
         const u32 binding = buffer.binding;
         if (buffer.buffer_type != BufferType::Guest) {
+            continue;
+        }
+        // ORDER1886 (port de TdlifePeng 7d8d5af): CS do jogo usam const buffers com
+        // element_size=2 cuja base guest é só 2-byte alinhada. O word offset (B16) é
+        // necessário mesmo em plataformas onde needs_buffer_offsets é false (AMD).
+        const bool needs_u16 = desc.GetSharp(info).GetElementSize() == 2;
+        if (!profile.needs_buffer_offsets && !needs_u16) {
             continue;
         }
 
@@ -255,7 +259,7 @@ void EmitContext::DefineBufferProperties() {
         Name(buf_offset, fmt::format("buf{}_off", binding));
         buffer.Offset(PointerSize::B8) = buf_offset;
 
-        if (True(desc.used_types & IR::Type::U16)) {
+        if (needs_u16 || True(desc.used_types & IR::Type::U16)) {
             const Id buf_word_offset{OpShiftRightLogical(U32[1], buf_offset, ConstU32(1U))};
             Name(buf_word_offset, fmt::format("buf{}_word_off", binding));
             buffer.Offset(PointerSize::B16) = buf_word_offset;
@@ -883,6 +887,9 @@ void EmitContext::DefineBuffers() {
 
         // Define aliases depending on the shader usage.
         auto& spv_buffer = buffers.emplace_back(binding.buffer++, desc.buffer_type);
+        // ORDER1886 (7d8d5af): buffers element_size==2 (base 2-byte alinhada) precisam do
+        // alias U16 mesmo quando o shader só usa LoadBufferU32.
+        const bool needs_u16 = buf_sharp.GetElementSize() == 2;
         if (True(desc.used_types & IR::Type::U64)) {
             spv_buffer.Alias(PointerType::U64) =
                 DefineBuffer(desc.is_written, is_coherent, 3, desc.buffer_type, U64);
@@ -895,7 +902,7 @@ void EmitContext::DefineBuffers() {
             spv_buffer.Alias(PointerType::F32) =
                 DefineBuffer(desc.is_written, is_coherent, 2, desc.buffer_type, F32[1]);
         }
-        if (True(desc.used_types & IR::Type::U16)) {
+        if (needs_u16 || True(desc.used_types & IR::Type::U16)) {
             spv_buffer.Alias(PointerType::U16) =
                 DefineBuffer(desc.is_written, is_coherent, 1, desc.buffer_type, U16);
         }
@@ -980,8 +987,11 @@ spv::ImageFormat GetFormat(const AmdGpu::Image& image) {
         image.GetNumberFmt() == AmdGpu::NumberFormat::Float) {
         return spv::ImageFormat::Rgba32f;
     }
-    UNREACHABLE_MSG("Unknown storage format data_format={}, num_format={}", image.GetDataFmt(),
-                    image.GetNumberFmt());
+    // ORDER1886 (crash run150, shader DMA 0xa8792bbb): T# de lixo com formato
+    // reservado chega aqui como storage image atômica — nunca abortar o jogo
+    // por isso; o BindTextures já rejeita o bind (descritor nulo) e o formato
+    // Unknown segue o caminho das storage não-atômicas.
+    return spv::ImageFormat::Unknown;
 }
 
 Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {

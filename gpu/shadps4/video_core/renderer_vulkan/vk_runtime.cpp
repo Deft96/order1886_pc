@@ -195,11 +195,19 @@ void Runtime::InlineData(VideoCore::Buffer* dst, u64 offset, u32 value) {
 bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
                       vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access,
                       std::optional<VideoCore::SubresourceRange> subres_range) {
+    // ORDER1886: o hook (Join do BindHelper) roda FORA do mutex — segurá-lo
+    // aqui travaria com a thread helper (ela mesma chama Transit).
     BeforeImageAccess();
     if (scene_targets) scene_targets->NativeAccess(*image, dst_access);
+    std::scoped_lock lock{image_barrier_mutex};
     const size_t prev_num_barriers = static_cast<size_t>(image_barriers.size());
     image->GetBarriers(image_barriers, dst_layout, dst_access, dst_stage, subres_range);
     return image_barriers.size() != prev_num_barriers;
+}
+
+vk::ImageLayout Runtime::GetBackingLayout(const VideoCore::Image* image) {
+    std::scoped_lock lock{image_barrier_mutex};
+    return image->backing->state.layout;
 }
 
 Runtime::TransferMark::TransferMark(Runtime& runtime, const char* what,
@@ -753,7 +761,11 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
         constexpr auto dst_access =
             vk::AccessFlagBits2::eColorAttachmentRead | vk::AccessFlagBits2::eColorAttachmentWrite;
         constexpr auto dst_layout = vk::ImageLayout::eColorAttachmentOptimal;
-        image_barriers.push_back(vk::ImageMemoryBarrier2{
+        // ORDER1886 (DrawPipe): push direto fora do Transit precisa do mutex
+        // também (escopo fechado: o FlushBarriers abaixo trava de novo).
+        {
+            std::scoped_lock lock{image_barrier_mutex};
+            image_barriers.push_back(vk::ImageMemoryBarrier2{
             .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
             .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
             .dstStageMask = dst_stage,
@@ -771,6 +783,7 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
                 .layerCount = image->info.resources.layers,
             },
         });
+        }
         FlushBarriers();
 
         // Copy between ms and non ms backing images
@@ -779,6 +792,7 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
             backing->num_samples > 1, backing->image, new_backing->image);
 
         // Update current layout in tracker to new backings layout
+        std::scoped_lock lock{image_barrier_mutex};
         new_backing->state.layout = dst_layout;
         new_backing->state.access_mask = dst_access;
         new_backing->state.pl_stage = dst_stage;
@@ -789,6 +803,10 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
 
 bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 size,
                                bool check_read_access) {
+    // ORDER1886 (DrawPipe): barrier_tracker é tocado pelo Stage B (binds), Stage A
+    // (dispatch direto/uploads) e swap thread (presenter) sem exclusão. Mesma
+    // ordem de locks do resto do arquivo: este mutex antes dos do scheduler.
+    std::scoped_lock lock{image_barrier_mutex};
     const AddressRange range = {
         .resource = reinterpret_cast<u64>(handle),
         .range_start = offset,
@@ -803,6 +821,9 @@ bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 
 
 void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size,
                            vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access) {
+    // ORDER1886 (DrawPipe): ver IsBufferAccessed (barrier_tracker, access_memo e
+    // memory_barrier compartilhados entre Stage A/B e swap thread).
+    std::scoped_lock lock{image_barrier_mutex};
     AddressRange range = {
         .resource = reinterpret_cast<u64>(handle),
         .range_start = offset,
@@ -859,6 +880,7 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
 
 void Runtime::FlushBarriers() {
     BeforeImageAccess();
+    std::scoped_lock lock{image_barrier_mutex};
     vk::DependencyInfo dep_info{};
 
     if (memory_barrier.srcStageMask) {

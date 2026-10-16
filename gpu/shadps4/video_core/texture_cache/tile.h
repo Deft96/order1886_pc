@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdio>
 #include "common/assert.h"
 #include "common/types.h"
 
@@ -291,6 +292,27 @@ constexpr auto hw_pipe_interleave = 256u;
 
 constexpr std::pair<u32, u32> GetMacroTileExtents(AmdGpu::TileMode tile_mode, u32 bpp,
                                                   u32 num_samples, bool alt) {
+    // ORDER1886: T# de lixo com macro tile chega aqui por paths que o REJECTT#
+    // do bind nao ve (run200: assert num_samples). Num port, lixo nao pode
+    // matar o processo: logar (throttled) e cair para valores validos
+    // (imagem com tamanho aproximado = glitch visual limitado, nao crash).
+    if (num_samples < 1 || num_samples > 8 || u32(tile_mode) > 0x1A ||
+        (bpp != 8 && bpp != 16 && bpp != 32 && bpp != 64 && bpp != 128)) {
+        static u32 reports = 0;
+        if (reports < 8) {
+            ++reports;
+            std::fprintf(stderr,
+                         "ORDER1886 TILE-FALLBACK tile=%u bpp=%u samples=%u (clamped)\n",
+                         u32(tile_mode), bpp, num_samples);
+        }
+        num_samples = std::clamp(num_samples, 1u, 8u);
+        if (u32(tile_mode) > 0x1A) {
+            tile_mode = AmdGpu::TileMode::Thin2DThin;
+        }
+        if (bpp != 8 && bpp != 16 && bpp != 32 && bpp != 64 && bpp != 128) {
+            bpp = 32;
+        }
+    }
     ASSERT(num_samples <= 8);
     const auto samples_log = static_cast<u32>(std::log2(num_samples));
     const auto row = u32(tile_mode) * 5;

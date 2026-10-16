@@ -152,6 +152,11 @@ public:
         u32 depth_target : 1;
         u32 vo_surface : 1;
     } usage{};
+    /// ORDER1886: frames consecutivos com o upload adiado pelo orçamento
+    /// (anti-starvation: UI amarra por último e perdia a corrida).
+    u32 upload_deferred_frames = 0;
+    /// ORDER1886: último frame da revalidação de conteúdo (safety net).
+    u32 verify_frame = 0;
     bool scene_proxy = false; ///< gow3: SceneTargets holds a reduced-size proxy of it
     VAddr track_addr = 0;
     VAddr track_addr_end = 0;

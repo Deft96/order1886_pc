@@ -140,6 +140,11 @@ s32 PS4_SYSV_ABI sceVideoOutRegisterBuffers(s32 handle, s32 startIndex, void* co
 
 s32 PS4_SYSV_ABI sceVideoOutSetFlipRate(s32 handle, s32 rate) {
     LOG_TRACE(Lib_VideoOut, "called");
+    // ORDER1886 diag (ORDER1886_TIMER_TRACE=1): what the game really asks for.
+    static unsigned calls;
+    if (std::getenv("ORDER1886_TIMER_TRACE") && calls++ < 30) {
+        std::printf("FLIP-RATE handle=%d rate=%d\n", handle, rate);
+    }
     driver->GetPort(handle)->flip_rate = rate;
     return ORBIS_OK;
 }
@@ -181,6 +186,15 @@ s32 PS4_SYSV_ABI sceVideoOutSubmitFlip(s32 handle, s32 bufferIndex, s32 flipMode
         return ORBIS_VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
     }
 
+    // ORDER1886 diag (ORDER1886_TIMER_TRACE=1): the game's flip submission time, to measure the
+    // acceptance latency (the particle cadence follows the flips).
+    static unsigned flip_submits;
+    if (std::getenv("ORDER1886_TIMER_TRACE") && flip_submits++ < 300) {
+        std::printf("FLIP-SUBMIT t=%lld\n",
+                    static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                              std::chrono::steady_clock::now().time_since_epoch())
+                                              .count()));
+    }
     return ORBIS_OK;
 }
 

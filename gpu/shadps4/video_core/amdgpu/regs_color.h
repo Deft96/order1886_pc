@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
+
 #include "video_core/amdgpu/pixel_format.h"
 #include "video_core/amdgpu/gow3_msaa.h"
 #include "video_core/amdgpu/tiling.h"
@@ -43,7 +46,6 @@ struct BlendControl {
         Max = 3,
         ReverseSubtract = 4,
     };
-
     BlendFactor color_src_factor : 5;
     BlendFunc color_func : 3;
     BlendFactor color_dst_factor : 5;
@@ -310,5 +312,12 @@ struct ColorBuffer {
         return number_fmt == NumberFormat::SnormNz ? NumberFormat::Srgb : number_fmt;
     }
 };
+
+// ORDER1886: endereço do CB quando o clear word foi escrito (SetContextReg em
+// liverpool.cpp). O jogo reescreve o MESMO valor a cada frame (CB6: 00ffff00), então
+// comparar valores não detecta o clear armado; e o índice do slot não basta (o RT do
+// slot muda). Associa o clear word ao ENDEREÇO do CB vigente no momento da escrita —
+// o BeginRendering limpa só esse endereço.
+inline std::array<std::atomic<u64>, 8> clear_word_armed_addr{};
 
 } // namespace AmdGpu

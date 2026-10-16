@@ -274,7 +274,12 @@ GraphicsPipeline::GraphicsPipeline(
     std::array<vk::Format, Shader::IR::NumRenderTargets> color_formats;
     for (s32 i = 0; i < key.num_color_attachments; ++i) {
         const auto& col_buf = key.color_buffers[i];
-        const auto format = LiverpoolToVK::SurfaceFormat(col_buf.data_format, col_buf.num_format);
+        // ORDER1886: CB com combinação sem mapeamento Vulkan (MRT com lixo) não pode assertar.
+        vk::Format format =
+            LiverpoolToVK::TrySurfaceFormat(col_buf.data_format, col_buf.num_format);
+        if (format == vk::Format::eUndefined) {
+            format = vk::Format::eR32G32B32A32Sfloat;
+        }
         const auto color_format =
             instance.GetSupportedFormat(format, vk::FormatFeatureFlagBits2::eColorAttachment);
         if (!instance.IsFormatSupported(color_format,
@@ -436,6 +441,12 @@ GraphicsPipeline::GraphicsPipeline(
     auto [pipeline_result, pipe] =
         CreateCachedGraphicsPipeline(device, pipeline_cache, pipeline_info, key,
                                      instance.GetPipelineBinaryGlobalKey(), binary_directory);
+    // ORDER1886: o assert sozinho não diz QUAL shader o driver rejeitou (lixo
+    // de T# do walker -> ErrorUnknown). Logar antes para o bind-vazio.
+    if (pipeline_result != vk::Result::eSuccess) {
+        LOG_ERROR(Render_Vulkan, "ORDER1886 GRAPHICS-FAIL {}: {}",
+                  vk::to_string(pipeline_result), debug_str);
+    }
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create graphics pipeline: {}",
                vk::to_string(pipeline_result));
     pipeline = std::move(pipe);
@@ -475,10 +486,17 @@ void GraphicsPipeline::GetVertexInputs(
     for (const auto& attrib : fetch_shader->attributes) {
         const auto step_rate = attrib.GetStepRate();
         const auto buffer = attrib.GetSharp(vs_info);
+        // ORDER1886: o guest pode deixar lixo no V# (ex: FormatBG_RG+Srgb); SurfaceFormat
+        // assertaria. Usa o formato real quando existe, senão um fallback neutro.
+        vk::Format vfmt =
+            LiverpoolToVK::TrySurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt());
+        if (vfmt == vk::Format::eUndefined) {
+            vfmt = vk::Format::eR32G32B32A32Sfloat;
+        }
         attributes.push_back(Attribute{
             .location = attrib.semantic,
             .binding = attrib.semantic,
-            .format = LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt()),
+            .format = vfmt,
             .offset = 0,
         });
         bindings.push_back(Binding{

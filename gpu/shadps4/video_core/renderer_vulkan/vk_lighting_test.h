@@ -100,7 +100,7 @@ inline std::uint32_t ShaderBinaryVersion(std::uint32_t base, std::uint32_t salt)
 /// GOW3_LIGHTING_TEST, read once; the marker goes to stdout (last_run.log) the first time.
 inline Flags Current() {
     static const Flags flags = [] {
-        const Flags parsed = Parse(std::getenv("GOW3_LIGHTING_TEST"));
+        const Flags parsed = Parse(std::getenv("ORDER1886_LIGHTING_TEST"));
         if (parsed.Any()) {
             std::printf("%s\n", Marker(parsed).c_str());
         }

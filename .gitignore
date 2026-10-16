@@ -2,7 +2,7 @@ out/
 __pycache__/
 user/
 *.mp4
-gow3.ini
+order1886.ini
 fsr4_shaders/
 pgo/
 *.png
@@ -22,4 +22,4 @@ perf.data
 /docs/route_run.log
 mods.json
 patches.json
-!launcher/gow3.png
+!launcher/order1886.png

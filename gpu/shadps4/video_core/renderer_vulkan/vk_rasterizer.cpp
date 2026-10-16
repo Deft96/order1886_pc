@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <mutex>
+#include <unordered_set>
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "gow3_toggles.h"
@@ -97,24 +99,14 @@ inline AmdGpu::CbDbExtent Rasterizer::DbExtent() const {
 }
 
 namespace {
-/// magic_enum::enum_contains, from a table: it scans every enumerator (per texture per draw).
+/// The format must exist in the Vulkan surface-format table (not just in the GCN enums):
+/// The Order: 1886 emits T#/V# with combos like FormatBG_RG+Srgb that are enum-valid but
+/// have no Vulkan mapping, and SurfaceFormat() asserts on them.
 bool IsKnownFormat(AmdGpu::DataFormat data_fmt, AmdGpu::NumberFormat num_fmt) {
-    static const auto tables = [] {
-        std::pair<std::array<bool, 256>, std::array<bool, 256>> t{};
-        for (const auto value : magic_enum::enum_values<AmdGpu::DataFormat>()) {
-            if (static_cast<u32>(value) < 256) {
-                t.first[static_cast<u32>(value)] = true;
-            }
-        }
-        for (const auto value : magic_enum::enum_values<AmdGpu::NumberFormat>()) {
-            if (static_cast<u32>(value) < 256) {
-                t.second[static_cast<u32>(value)] = true;
-            }
-        }
-        return t;
-    }();
-    const u32 d = static_cast<u32>(data_fmt), n = static_cast<u32>(num_fmt);
-    return d < 256 && n < 256 && tables.first[d] && tables.second[n];
+    if (data_fmt == AmdGpu::DataFormat::FormatInvalid) {
+        return false;
+    }
+    return LiverpoolToVK::TrySurfaceFormat(data_fmt, num_fmt) != vk::Format::eUndefined;
 }
 } // namespace
 
@@ -373,7 +365,7 @@ constexpr u32 AlignPacket(u32 size) {
 }
 u32 VerifyInterval() {
     static const u32 interval = [] {
-        const char* env = std::getenv("GOW3_PIPE_VERIFY");
+        const char* env = std::getenv("ORDER1886_PIPE_VERIFY");
         return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 0u;
     }();
     return interval;
@@ -381,7 +373,7 @@ u32 VerifyInterval() {
 } // namespace
 
 bool Rasterizer::DrawPipeWanted() {
-    const char* env = std::getenv("GOW3_DRAW_PIPE");
+    const char* env = std::getenv("ORDER1886_DRAW_PIPE");
     if (env && env[0]) {
         return env[0] == '1';
     }
@@ -414,7 +406,7 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
     if (!draw_pipe || !OnStageA()) {
         return;
     }
-    static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
+    static const bool stats = std::getenv("ORDER1886_FRAME_STATS") != nullptr;
     if (!stats) {
         draw_pipe->Drain(reason);
         return;
@@ -424,6 +416,16 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
     if (const u64 waited = draw_pipe->drain_cycles - before) {
         drain_sites[function][line] += waited;
     }
+}
+
+// ORDER1886 (DrawPipe): any-thread drain for the presenter (swap thread). Takes no
+// locks (DrainPosted spins on atomics only), so it can't deadlock against the
+// recording thread, which never waits on the presenter.
+void Rasterizer::DrainDrawPipeFromAnyThread() {
+    if (!draw_pipe) {
+        return;
+    }
+    draw_pipe->DrainPosted();
 }
 
 bool Rasterizer::IsGpuSideThread() const {
@@ -834,7 +836,7 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
 }
 
 void Rasterizer::PrintPipeStats() {
-    static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
+    static const bool stats = std::getenv("ORDER1886_FRAME_STATS") != nullptr;
     if (!stats || (draw_pipe->packets & 1023) != 0) {
         return;
     }
@@ -879,6 +881,80 @@ void Rasterizer::PrintPipeStats() {
             }
         }
     }
+    // ORDER1886 (DrawPipe): per-draw CPU breakdown. Absolute us/draw (steady-clock ns,
+    // exact) + share of the measured sum (self-consistent, no TSC guess). The gap to
+    // 100% B-busy is packet handling/scheduling overhead. Only with BIND_TIMERS.
+    static u64 last_bindbuf = 0, last_bindtex = 0, last_begin = 0, last_vbemit = 0,
+               last_recflush = 0, last_nbinds = 0;
+    static u64 last_ring = 0, last_obtain = 0, last_nbufs = 0;
+    if (Gow3Stats::bind_timers) {
+    const u64 d_bindbuf = Gow3Stats::t_bindbuf.load(std::memory_order_relaxed) - last_bindbuf;
+    const u64 d_bindtex = Gow3Stats::t_bindtex.load(std::memory_order_relaxed) - last_bindtex;
+    const u64 d_begin = Gow3Stats::t_begin.load(std::memory_order_relaxed) - last_begin;
+    const u64 d_vbemit = Gow3Stats::t_vbemit.load(std::memory_order_relaxed) - last_vbemit;
+    const u64 d_recflush = Gow3Stats::t_recflush.load(std::memory_order_relaxed) - last_recflush;
+    const u64 d_nbinds = Gow3Stats::n_binds.load(std::memory_order_relaxed) - last_nbinds;
+    const double dsum =
+        double(d_bindbuf + d_bindtex + d_begin + d_vbemit + d_recflush);
+    std::printf("\n  bind us/draw: buf %.1f tex %.1f begin %.1f vb %.1f flush %.1f (of measured: "
+                "buf %.0f%% tex %.0f%% begin %.0f%% vb %.0f%% flush %.0f%%, n=%llu)\n",
+                d_nbinds ? d_bindbuf / 1000.0 / d_nbinds : 0.0,
+                d_nbinds ? d_bindtex / 1000.0 / d_nbinds : 0.0,
+                d_nbinds ? d_begin / 1000.0 / d_nbinds : 0.0,
+                d_nbinds ? d_vbemit / 1000.0 / d_nbinds : 0.0,
+                d_nbinds ? d_recflush / 1000.0 / d_nbinds : 0.0,
+                dsum > 0 ? 100.0 * d_bindbuf / dsum : 0.0,
+                dsum > 0 ? 100.0 * d_bindtex / dsum : 0.0,
+                dsum > 0 ? 100.0 * d_begin / dsum : 0.0,
+                dsum > 0 ? 100.0 * d_vbemit / dsum : 0.0,
+                dsum > 0 ? 100.0 * d_recflush / dsum : 0.0,
+                static_cast<unsigned long long>(d_nbinds));
+    // ORDER1886 (DrawPipe): BindBuffers detail (us/buffer + share of buf).
+    const u64 d_ring = Gow3Stats::t_ring.load(std::memory_order_relaxed) - last_ring;
+    const u64 d_obtain = Gow3Stats::t_obtain.load(std::memory_order_relaxed) - last_obtain;
+    const u64 d_nbufs = Gow3Stats::n_bufs.load(std::memory_order_relaxed) - last_nbufs;
+    const double dbuf = double(d_bindbuf);
+    std::printf("  buf detail us/buf: ring %.2f obtain %.2f misc %.2f (of buf: ring %.0f%% obtain "
+                "%.0f%% misc %.0f%%, nbufs=%llu)\n",
+                d_nbufs ? d_ring / 1000.0 / d_nbufs : 0.0,
+                d_nbufs ? d_obtain / 1000.0 / d_nbufs : 0.0,
+                d_nbufs ? (dbuf - d_ring - d_obtain) / 1000.0 / d_nbufs : 0.0,
+                dbuf > 0 ? 100.0 * d_ring / dbuf : 0.0, dbuf > 0 ? 100.0 * d_obtain / dbuf : 0.0,
+                dbuf > 0 ? 100.0 * (dbuf - d_ring - d_obtain) / dbuf : 0.0,
+                static_cast<unsigned long long>(d_nbufs));
+    } // bind_timers
+    // ORDER1886: A-side pipeline selection (us/get). Se crescer com a sessao,
+    // é o motor da degradacao 30->22 (lookup sobre cache que só acumula).
+    static u64 last_apipe = 0, last_napipe = 0;
+    const u64 d_apipe = Gow3Stats::t_apipe.load(std::memory_order_relaxed) - last_apipe;
+    const u64 d_napipe = Gow3Stats::n_apipe.load(std::memory_order_relaxed) - last_napipe;
+    if (Gow3Stats::bind_timers) {
+        std::printf("  apipe us/get: %.2f (n=%llu)\n",
+                    d_napipe ? d_apipe / 1000.0 / d_napipe : 0.0,
+                    static_cast<unsigned long long>(d_napipe));
+    }
+    last_apipe = Gow3Stats::t_apipe.load(std::memory_order_relaxed);
+    last_napipe = Gow3Stats::n_apipe.load(std::memory_order_relaxed);
+    // ORDER1886: arena obtain memo hit-rate (-effective? se hits altos e fps igual,
+    // o custo está fora do ObtainBuffer). Sempre imprime (contadores baratos).
+    static u64 last_hits = 0, last_misses = 0;
+    const u64 d_hits = Gow3Stats::obtain_hits.load(std::memory_order_relaxed) - last_hits;
+    const u64 d_misses = Gow3Stats::obtain_misses.load(std::memory_order_relaxed) - last_misses;
+    std::printf("  obtain memo: %llu hits %llu misses (%.0f%%)\n",
+                static_cast<unsigned long long>(d_hits),
+                static_cast<unsigned long long>(d_misses),
+                d_hits + d_misses > 0 ? 100.0 * d_hits / (d_hits + d_misses) : 0.0);
+    last_hits = Gow3Stats::obtain_hits.load(std::memory_order_relaxed);
+    last_misses = Gow3Stats::obtain_misses.load(std::memory_order_relaxed);
+    last_ring = Gow3Stats::t_ring.load(std::memory_order_relaxed);
+    last_obtain = Gow3Stats::t_obtain.load(std::memory_order_relaxed);
+    last_nbufs = Gow3Stats::n_bufs.load(std::memory_order_relaxed);
+    last_bindbuf = Gow3Stats::t_bindbuf.load(std::memory_order_relaxed);
+    last_bindtex = Gow3Stats::t_bindtex.load(std::memory_order_relaxed);
+    last_begin = Gow3Stats::t_begin.load(std::memory_order_relaxed);
+    last_vbemit = Gow3Stats::t_vbemit.load(std::memory_order_relaxed);
+    last_recflush = Gow3Stats::t_recflush.load(std::memory_order_relaxed);
+    last_nbinds = Gow3Stats::n_binds.load(std::memory_order_relaxed);
     std::printf("\n");
     drain_sites.clear();
     draw_pipe->drains_by_reason = {};
@@ -932,7 +1008,13 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
             return;
         }
     }
-    const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline({}, prepared);
+    const GraphicsPipeline* pipeline;
+    {
+        // ORDER1886: A-side pipeline selection cost (fecha o quadro CPU A+B).
+        Gow3Stats::n_apipe.fetch_add(1, std::memory_order_relaxed);
+        Gow3Stats::BindTimer tm{Gow3Stats::t_apipe};
+        pipeline = pipeline_cache.GetGraphicsPipeline({}, prepared);
+    }
     const PreparedDraw* used_prepared = pipeline_cache.UsedPrepared();
     if (prepared) {
         draw_prep->Count(pipeline != nullptr &&
@@ -951,7 +1033,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
 
 void Rasterizer::DiagPassBoundary(bool force) {
     static const bool enabled = [] {
-        const char* env = std::getenv("GOW3_DIAG_IMAGES");
+        const char* env = std::getenv("ORDER1886_DIAG_IMAGES");
         return env && *env == '1';
     }();
     if (!enabled) {
@@ -1000,17 +1082,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         camera_motion->SetJitter(upscaler->Jitter());
         object_motion->OnFrameStart();
         NoteFrameStart();
-        static const char* scene_debug = std::getenv("GOW3_SCENE_DEBUG");
+        static const char* scene_debug = std::getenv("ORDER1886_SCENE_DEBUG");
         scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
         scene_targets->debug = scene_debug_frame;
-    } else if (regs.color_buffers[0] &&
-               FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address()) &&
-               regs.color_buffers[0].Address() != last_display_buffer) {
-        // Without an upscaler: still count the frame (GOW3_GPU_PROFILE, GOW3_BUFFER_STATS),
-        // once per display buffer since the HUD draws into it as well.
-        // ponytail: assumes flips rotate display buffers; a single-buffer game counts one frame.
-        last_display_buffer = regs.color_buffers[0].Address();
-        NoteFrameStart();
     }
     bind_prepared = used_prepared;
     motion_draw = pipeline->GetGraphicsKey().motion_vectors;
@@ -1037,17 +1111,22 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const auto state = BeginRendering(pipeline);
 
     if (!inputs_resolved) {
+        Gow3Stats::BindTimer tm{Gow3Stats::t_vbemit};
         ResolveVertexBuffers(pipeline, draw_prepared);
         if (is_indexed) {
             ResolveIndexBuffer(index_offset);
         }
     }
-    EmitVertexBuffers();
-    if (is_indexed) {
-        EmitIndexBuffer();
+    {
+        Gow3Stats::BindTimer tm{Gow3Stats::t_vbemit};
+        EmitVertexBuffers();
+        if (is_indexed) {
+            EmitIndexBuffer();
+        }
     }
 
     if (needs_barrier) {
+        Gow3Stats::BindTimer tm{Gow3Stats::t_recflush};
         runtime.FlushBarriers();
     }
 
@@ -1068,7 +1147,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         // since last frame (model constants follow the camera, the palette does not). The
         // check comes first: most gated draws are static world pieces with long index lists.
         static const bool all_motion = [] {
-            const char* value = std::getenv("GOW3_OBJECT_MOTION_ALL");
+            const char* value = std::getenv("ORDER1886_OBJECT_MOTION_ALL");
             return value && value[0] == '1';
         }();
         bool gated = !all_motion;
@@ -1328,7 +1407,12 @@ void Rasterizer::DispatchDirect() {
     if (!pipelined) {
         DrainDrawPipe();
     }
-    const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
+    const ComputePipeline* pipeline;
+    {
+        Gow3Stats::n_apipe.fetch_add(1, std::memory_order_relaxed);
+        Gow3Stats::BindTimer tm{Gow3Stats::t_apipe};
+        pipeline = pipeline_cache.GetComputePipeline();
+    }
     if (!pipeline) {
         return;
     }
@@ -1375,6 +1459,15 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
 
     scheduler.EndRendering();
     mark();
+    // ORDER1886 (port de TdlifePeng/shadPS4@1886 af2b036): hack VSM — o depth-reduction
+    // clear nunca dispatches no emulador, então o SSBO de tile coverage ficaria zerado e o
+    // pass de conversão VSM tomaria o caminho de tile vazio (sem sombras + GPU hang no
+    // driver AMD). Força o clear shader a escrever 0x7F80000F (+inf com tile mask 0xF).
+    // REATIVADO 14/10 noite: o borrão era o clear da cadeia (outra causa); sem este hack
+    // o jogo não tem sombras.
+    if (cs.pgm_hash == 0x9846aaff) {
+        push_data.ud_regs[1] = 0x7F80000F;
+    }
     pipeline->BindResources(set_writes, push_data);
 
     const vk::Pipeline handle = pipeline->Handle();
@@ -1397,7 +1490,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     // gow3 diagnostics: GOW3_DIAG_IMAGES=1 writes the images a dispatch read and wrote, after
     // it, while a frame capture records (GOW3_CAPTURE_TRIGGER).
     static const bool diag_images = [] {
-        const char* env = std::getenv("GOW3_DIAG_IMAGES");
+        const char* env = std::getenv("ORDER1886_DIAG_IMAGES");
         return env && *env == '1';
     }();
     if (diag_images && FrameCapture::IsRecording()) {
@@ -1420,7 +1513,12 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     if (!pipelined) {
         DrainDrawPipe();
     }
-    const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
+    const ComputePipeline* pipeline;
+    {
+        Gow3Stats::n_apipe.fetch_add(1, std::memory_order_relaxed);
+        Gow3Stats::BindTimer tm{Gow3Stats::t_apipe};
+        pipeline = pipeline_cache.GetComputePipeline();
+    }
     if (!pipeline) {
         return;
     }
@@ -1513,7 +1611,7 @@ const PreparedStage* Rasterizer::FindPreparedStage(const Shader::Info& stage) co
 
 bool Rasterizer::BindHelperWanted() {
     // A spinning helper pays off only with cores to spare (the recording thread spins too).
-    const char* env = std::getenv("GOW3_TEXTURE_HELPER");
+    const char* env = std::getenv("ORDER1886_TEXTURE_HELPER");
     if (env && env[0]) {
         return env[0] == '1';
     }
@@ -1612,6 +1710,8 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         IsComputeImageClear(pipeline)) {
         return false;
     }
+    // ORDER1886 (DrawPipe): per-draw CPU breakdown (leitura no PrintPipeStats).
+    Gow3Stats::n_binds.fetch_add(1, std::memory_order_relaxed);
 
     set_write_index = 0;
     set_writes.clear();
@@ -1634,7 +1734,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
 
     bool uses_dma = false;
 
-    static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
+    static const bool stats = std::getenv("ORDER1886_FRAME_STATS") != nullptr;
     if (stats && ((helper_full + helper_partial + helper_serial) & 1023) == 0) {
         static auto window = std::chrono::steady_clock::now();
         const auto now = std::chrono::steady_clock::now();
@@ -1666,8 +1766,14 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                               stage->samplers.size());
             stage->PushUd(binding, push_data);
             const PreparedStage* prepared = FindPreparedStage(*stage);
-            BindBuffers(*stage, prepared, binding, push_data, set_write_index);
-            BindTextures(*stage, prepared, binding, set_write_index, needs_barrier);
+            {
+                Gow3Stats::BindTimer tm{Gow3Stats::t_bindbuf};
+                BindBuffers(*stage, prepared, binding, push_data, set_write_index);
+            }
+            {
+                Gow3Stats::BindTimer tm{Gow3Stats::t_bindtex};
+                BindTextures(*stage, prepared, binding, set_write_index, needs_barrier);
+            }
             uses_dma |= stage->uses_dma;
         }
     } else {
@@ -1710,6 +1816,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         bind_helper.Fork(&RunTextureTask, this);
         for (u32 i = 0; i < task.count; ++i) {
             auto& stage = buffer_stages[i];
+            Gow3Stats::BindTimer tm{Gow3Stats::t_bindbuf};
             BindBuffers(*stage.info, stage.prepared, stage.binding, push_data, stage.write_index);
         }
         if (draw_inputs.pending && !Gow3Toggle::Disabled(Gow3Toggle::EarlyDrawInputs)) {
@@ -1727,6 +1834,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         for (u32 i = task.completed; i < task.count; ++i) {
             auto& stage = task.stages[i];
             u32 write_index = stage.write_index;
+            Gow3Stats::BindTimer tm{Gow3Stats::t_bindtex};
             BindTextures(*stage.info, stage.prepared, stage.binding, write_index, needs_barrier);
         }
     }
@@ -2114,8 +2222,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
     const u64 alignment = instance.StorageMinAlignment();
     for (u32 buffer_index = 0; buffer_index < stage.buffers.size(); ++buffer_index) {
         const auto& desc = stage.buffers[buffer_index];
+        Gow3Stats::n_bufs.fetch_add(1, std::memory_order_relaxed);
         const RingBinding* ring = num_ring_stages ? FindRingBinding(stage, buffer_index) : nullptr;
         if (ring) {
+            Gow3Stats::BindTimer tm{Gow3Stats::t_ring};
             // Copied by the GPU command thread into the constant ring (read-only).
             // gow3: dump the ring's own copy, not the guest address. A binding whose bytes came
             // from the host keeps `address` as a label only, and it can be zero; IsValidGpuMapping
@@ -2212,6 +2322,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
             } else {
+                Gow3Stats::BindTimer tm{Gow3Stats::t_obtain};
                 const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
                 if (size != vsharp.GetSize()) {
                     LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x}",
@@ -2222,8 +2333,16 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 const u64 offset_aligned = Common::AlignDown(offset, alignment);
                 const u64 adjust = offset - offset_aligned;
                 if (adjust % 4 != 0) {
-                    LOG_WARNING(Render_Vulkan, "Buffer binding in shader {:#x} isn't dword aligned",
-                                stage.pgm_hash);
+                    // ORDER1886: 1x por shader (disparava por bind por draw: ~500/frame
+                    // e afogava o log + taxava CPU).
+                    static std::mutex warn_mutex;
+                    static std::unordered_set<u32> warned;
+                    std::scoped_lock lock{warn_mutex};
+                    if (warned.insert(stage.pgm_hash).second) {
+                        LOG_WARNING(Render_Vulkan,
+                                    "Buffer binding in shader {:#x} isn't dword aligned",
+                                    stage.pgm_hash);
+                    }
                 }
                 push_data.AddOffset(binding.buffer, adjust);
                 buffer_infos.emplace_back(buffer->Handle(), offset_aligned, size + adjust);
@@ -2252,9 +2371,7 @@ Rasterizer::ImageDescCacheEntry& Rasterizer::CachedImageDescEntry(const AmdGpu::
                                                                    u64 hash) {
     std::array<u64, 4> key;
     std::memcpy(key.data(), &sharp, sizeof(key));
-    // gow3: needs_native too, since FindImage resolves partial height views only for it.
-    const u32 flags = u32(res.is_written) | u32(res.is_depth) << 1 | u32(res.is_array) << 2 |
-                      u32(res.needs_native) << 3;
+    const u32 flags = u32(res.is_written) | u32(res.is_depth) << 1 | u32(res.is_array) << 2;
     // Two-way set associative: a frame binds a few thousand distinct T#s.
     auto* set = &image_desc_cache[(hash % (image_desc_cache.size() / 2)) * 2];
     const auto matches = [&](const ImageDescCacheEntry& e) {
@@ -2326,10 +2443,146 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
 
     for (u32 image_index = 0; image_index < stage.images.size(); ++image_index) {
         const auto& image_desc = stage.images[image_index];
+        // ORDER1886 (port de TdlifePeng/shadPS4@1886 af2b036): CS de sombra 0xa7b66f58/
+        // 0xefaaab2b têm T# lixo (nunca sampleiam); amarra descritores vazios em vez de
+        // deixar o texture cache parsear sharp inválido e derrubar o driver/GPU.
+        // 0x804aeead é outro CS da família com T# lixo comprovado em run (REJECTT#:
+        // layers=8192, fmt=33, addr=32TB; cf. 7faaa8a "unexpected data format").
+        // 0x3c2622c0/0x51f03591 emitem o array 32x8x1024 e precedem o fault do driver
+        // AMD no run14 (amdvlk64.dll+0x4b670c). 0xa8b3aa69 idem (32x27x1024, run18,
+        // amdvlk64.dll+0x4c2181). Os VS 0xad441fb1/0x8c8a4817 emitem T# de lixo
+        // constantemente (BIGT#/REJECTT#) e o driver rejeita permutações do pipeline
+        // deles (GRAPHICS-FAIL, run57).
+        if (stage.pgm_hash == 0xa7b66f58 || stage.pgm_hash == 0xefaaab2b ||
+            stage.pgm_hash == 0x804aeead || stage.pgm_hash == 0x3c2622c0 ||
+            stage.pgm_hash == 0x51f03591 || stage.pgm_hash == 0xa8b3aa69 ||
+            stage.pgm_hash == 0xad441fb1 || stage.pgm_hash == 0x8c8a4817 ||
+            stage.pgm_hash == 0xc75dd317 || stage.pgm_hash == 0xd1017d4b ||
+            stage.pgm_hash == 0x539eee77 || stage.pgm_hash == 0x88c3afad) {
+            image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
+            image_binding_entries.push_back(nullptr);
+            binding_proxy_ok.push_back(false);
+            image_descriptor_array_sizes.push_back(1);
+            continue;
+        }
         const auto tsharp =
             prepared ? prepared->image_sharps[image_index] : image_desc.GetSharp(stage);
+        // ORDER1886 (lógica de TdlifePeng/shadPS4@1886 7faaa8a, adaptada): rejeitar T#
+        // impossíveis para o Vulkan antes que cheguem ao texture cache.
+        // - NumLayers() > 2048 nunca cria imagem válida (maxImageArrayLayers do hardware
+        //   AMD é 2048) e era o que estourava a VRAM com 7169/32768 layers;
+        // - last_array < base_array e base_level > last_level são ranges invertidos
+        //   (lixo; levels invertidos criavam views fora da imagem → assert no GetBarriers).
+        if (tsharp.NumLayers() > 2048 || tsharp.last_array < tsharp.base_array ||
+            tsharp.base_level > tsharp.last_level) {
+            image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
+            image_binding_entries.push_back(nullptr);
+            binding_proxy_ok.push_back(false);
+            image_descriptor_array_sizes.push_back(1);
+            continue;
+        }
+        // ORDER1886 (crash VRAM run148, shader DMA 0xa8792bbb): T# de lixo com
+        // dimensões PLAUSÍVEIS passava o filtro acima e pedia imagem gigante
+        // (VMA WITHIN_BUDGET estoura o orçamento ~4-6GB do AMD). Limite:
+        // - dims além do hardware (16384) ou mips impossíveis (mais níveis
+        //   que as dims comportam);
+        // - estimativa > 512MB (o maior legítimo do Order — 1920x800 RGBA16F
+        //   ou 4096x4096 — fica < 100MB; 512MB só o lixo atinge).
+        {
+            const u32 w = tsharp.width + 1;
+            const u32 h = tsharp.height + 1;
+            const u32 pitch = tsharp.Pitch();
+            const u32 levels = tsharp.NumLevels();
+            const u32 layers = tsharp.NumLayers();
+            bool dim_reject = false;
+            u64 est_bytes = 0;
+            if (w > 16384 || h > 16384 || pitch > 16384) {
+                dim_reject = true;
+            } else if (levels > 1) {
+                const u32 maxdim =
+                    tsharp.GetType() == AmdGpu::ImageType::Color3D
+                        ? std::max({w, h, static_cast<u32>(tsharp.depth + 1)})
+                        : std::max({w, h, pitch});
+                if (levels > 31 || (maxdim >> (levels - 1)) == 0) {
+                    dim_reject = true;
+                }
+            }
+            // ORDER1886 (crash run156, tile.h:294): MSAA com sample count
+            // impossível — em tipos MSAA o last_level É o sample count
+            // (1<<last_level); lixo com last_level alto (16+ samples)
+            // derrubava o UpdateSize no ASSERT(num_samples<=8) do
+            // GetMacroTileExtents. Amostragem real máxima: 8x.
+            if (!dim_reject && tsharp.IsGuestMsaa() && tsharp.GuestNumSamples() > 8) {
+                dim_reject = true;
+            }
+            // ORDER1886: tile 27-30 — a tabela macro_tile_extents só tem 27
+            // linhas (row=tile*5 → OOB, UB silencioso). O 31
+            // (DisplayLinearGeneral) é linear legítimo e nunca indexa a
+            // tabela — não rejeitar. Nenhum uso legítimo de 27-30 em 150+
+            // runs (o 3D do jogo usa tile 19).
+            if (!dim_reject && tsharp.tiling_index >= 27 && tsharp.tiling_index != 31) {
+                dim_reject = true;
+            }
+            if (!dim_reject) {
+                // O campo tem 6 bits (0-63) mas a tabela só vai até 41 (Bc7):
+                // valores acima disso são lixo certo — rejeitar antes de
+                // indexar a tabela (o NumBitsPerElement daria OOB + assert).
+                if (tsharp.data_format > 41) {
+                    dim_reject = true;
+                } else {
+                    const auto raw_fmt = static_cast<AmdGpu::DataFormat>(tsharp.data_format);
+                    const u32 bpe = AmdGpu::NumBitsPerElement(raw_fmt);
+                // gaps da tabela retornam 0 ou >128 (0xFFFFFFFF) = formato inválido.
+                if (bpe == 0 || bpe > 128) {
+                    dim_reject = true;
+                } else {
+                    u64 slices = layers;
+                    if (tsharp.GetType() == AmdGpu::ImageType::Color3D) {
+                        slices = static_cast<u64>(tsharp.depth + 1);
+                    }
+                    const u64 texels =
+                        static_cast<u64>(pitch) * static_cast<u64>(h) * slices;
+                    est_bytes = texels * bpe / 8;
+                    est_bytes *= 2; // teto da cadeia de mips (legítimo ~1.33x)
+                    est_bytes *= tsharp.GuestNumSamples();
+                    if (est_bytes > 512ull * 1024 * 1024) {
+                        dim_reject = true;
+                    }
+                    }
+                }
+            }
+            if (dim_reject) {
+                // ORDER1886: 1x por assinatura (o shader DMA spamma: 100k+ linhas).
+                static std::mutex reject_mutex;
+                static std::unordered_set<u64> reject_warned;
+                const u64 reject_key =
+                    (stage.pgm_hash * 0x9e3779b97f4a7c15ULL) ^ (u64(w) << 32) ^ (u64(h) << 16) ^
+                    (u64(layers) << 8) ^ u64(levels) ^ u64(tsharp.data_format);
+                bool reject_report = false;
+                {
+                    std::scoped_lock lock{reject_mutex};
+                    reject_report = reject_warned.insert(reject_key).second;
+                }
+                if (reject_report) {
+                    LOG_WARNING(Render_Vulkan,
+                                "Rejecting oversized T# pgm={:#x} {}x{} (pitch {}) x{} layers={} "
+                                "levels={} fmt={} est={}MB",
+                                stage.pgm_hash, w, h, pitch,
+                                tsharp.GetType() == AmdGpu::ImageType::Color3D
+                                    ? static_cast<u32>(tsharp.depth + 1)
+                                    : 1u,
+                                layers, levels, static_cast<u32>(tsharp.data_format),
+                                est_bytes / (1024 * 1024));
+                }
+                image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
+                image_binding_entries.push_back(nullptr);
+                binding_proxy_ok.push_back(false);
+                image_descriptor_array_sizes.push_back(1);
+                continue;
+            }
+        }
         // gow3: a hash lookup per texture per draw for a diagnostic only.
-        static const bool warn_meta = std::getenv("GOW3_WARN_META_TEXTURE") != nullptr;
+        static const bool warn_meta = std::getenv("ORDER1886_WARN_META_TEXTURE") != nullptr;
         if (warn_meta && texture_cache.IsMeta(tsharp.Address())) {
             LOG_WARNING(Render_Vulkan, "Unexpected metadata read by a shader (texture)");
         }
@@ -2346,11 +2599,24 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
 
         if (!memory->IsValidGpuMapping(tsharp.Address(), 0) ||
             !IsKnownFormat(data_fmt, num_fmt)) {
-            LOG_WARNING(Render_Vulkan,
-                        "Rejecting invalid T# address={:#x}, pitch={}, width={}, "
-                        "data_format={}, num_format={}",
-                        tsharp.Address(), tsharp.pitch, tsharp.width, static_cast<u32>(data_fmt),
-                        static_cast<u32>(num_fmt));
+            // ORDER1886: 1x por assinatura (rajadas como o oversized).
+            static std::mutex inv_reject_mutex;
+            static std::unordered_set<u64> inv_reject_warned;
+            const u64 inv_key = (u64(tsharp.Address()) * 0x9e3779b97f4a7c15ULL) ^
+                                (u64(tsharp.pitch) << 32) ^ (u64(tsharp.width) << 16) ^
+                                (u64(data_fmt) << 8) ^ u64(num_fmt);
+            bool inv_report = false;
+            {
+                std::scoped_lock lock{inv_reject_mutex};
+                inv_report = inv_reject_warned.insert(inv_key).second;
+            }
+            if (inv_report) {
+                LOG_WARNING(Render_Vulkan,
+                            "Rejecting invalid T# address={:#x}, pitch={}, width={}, "
+                            "data_format={}, num_format={}",
+                            tsharp.Address(), tsharp.pitch, tsharp.width,
+                            static_cast<u32>(data_fmt), static_cast<u32>(num_fmt));
+            }
             image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
             image_binding_entries.push_back(nullptr);
             binding_proxy_ok.push_back(false);
@@ -2526,7 +2792,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             }
 
             vk::ImageView view = *image_view.image_view;
-            vk::ImageLayout layout = image.backing->state.layout;
+            // ORDER1886 (DrawPipe): leitura sob o mutex de barreiras (Item 09600).
+            vk::ImageLayout layout = runtime.GetBackingLayout(&image);
             if (upscaler->Enabled()) {
                 // gow3: the display pass reads the upscaled frame (scaled presets).
                 upscaler->RedirectSampled(image_id, image_view.info, view, layout);
@@ -2699,7 +2966,8 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
                                     : vk::ImageLayout::eShaderReadOnlyOptimal;
         barrier |= runtime.Transit(&image, new_layout, vk::PipelineStageFlagBits2::eAllCommands,
                                    vk::AccessFlagBits2::eShaderRead, entry.range);
-        image_infos.emplace_back(VK_NULL_HANDLE, entry.view, image.backing->state.layout);
+        // ORDER1886 (DrawPipe): leitura sob o mutex de barreiras (Item 09600).
+        image_infos.emplace_back(VK_NULL_HANDLE, entry.view, runtime.GetBackingLayout(&image));
     }
     (void)first_image_idx;
     return true;
@@ -2767,6 +3035,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
 }
 
 RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
+    Gow3Stats::BindTimer tm{Gow3Stats::t_begin};
     attachment_feedback_loop = false;
     // gow3: frame analyzer census of this pass (sample counts and path, stencil, clears).
     const bool census_on = FrameCapture::Active();
@@ -2866,7 +3135,125 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const auto mip = image_view.info.range.base.level;
 
         const auto& col_buf = regs.color_buffers[cb];
-        const bool is_clear = texture_cache.IsMetaCleared(col_buf.CmaskAddress(), slice);
+        // ORDER1886: o jogo limpa a cadeia da volumétrica (RTs float pequenos) e o RT do
+        // sangue via mecanismos que o fork não detectava — os RTs acumulavam (véu de
+        // névoa, manchas de sangue). Dois sinais:
+        // 1) heurística da cadeia: RT float ≤960x400 → clear PRETO 1x/frame (o clear reg
+        //    do jogo para esses RTs é o default branco e causava piscadas);
+        // 2) clear word armado: o jogo escreve CB_COLORn_CLEAR_WORD a cada frame (visto no
+        //    CB6, val=00ffff00) — se o clear_word mudou desde o último uso do RT, o clear
+        //    foi armado → limpar com o valor do jogo.
+        // ORDER1886: os 3 arrays abaixo são estado do clear. Nota: sem lock — um mutex
+        // aqui causava DEADLOCK (o BeginRendering é reentrante sob threading, run70
+        // congelou). A race é benigna (afeta só o rate-limit do clear forçado).
+        const u64 frame = Gow3Stats::gpu_frames.load(std::memory_order_relaxed);
+        static std::array<std::pair<u64, u64>, 64> forced_clear{};
+        static std::array<std::tuple<u64, u64, u32>, 64> rt_use{}; // addr, last_frame, consec
+        static std::array<u64, 32> cmask_rts{}; // RTs que o jogo limpa via CMask (a luz)
+        const bool is_volumetric_rt = col_buf.GetNumberFmt() == AmdGpu::NumberFormat::Float &&
+                                      image->info.size.width <= 960 &&
+                                      image->info.size.height <= 400 &&
+                                      // ORDER1886: o RT 1x1 da luminância média (exposição)
+                                      // é PERSISTENTE (o jogo nunca o limpa — ele o
+                                      // sobrescreve quando recalcula); limpá-lo a cada frame
+                                      // zerava a exposição → escurecimento gradual.
+                                      !(image->info.size.width == 1 &&
+                                        image->info.size.height == 1);
+        // ORDER1886: acumulacao aditiva = One/One (sangue do lustre) OU
+        // SrcAlpha/One com func Add (sangue da bacia/menu: batch s4d1 no RT
+        // 1056b40000, que a regra antiga nao via -> acumulava ate estourar).
+        const bool is_add_blend =
+            regs.blend_control[0].enable &&
+            regs.blend_control[0].color_dst_factor == AmdGpu::BlendControl::BlendFactor::One &&
+            (regs.blend_control[0].color_src_factor == AmdGpu::BlendControl::BlendFactor::One ||
+             (regs.blend_control[0].color_src_factor ==
+                  AmdGpu::BlendControl::BlendFactor::SrcAlpha &&
+              regs.blend_control[0].color_func == AmdGpu::BlendControl::BlendFunc::Add));
+        const bool is_add_1920 = is_add_blend && image->info.size.width == 1920 &&
+                                 col_buf.GetNumberFmt() == AmdGpu::NumberFormat::Float;
+        // ORDER1886: o acumulador de LUZ (1055100000) é limpo via CMask RARAMENTE (quando a
+        // cena muda); o RT do SANGUE (1056b40000) nunca. Registra os endereços que JÁ
+        // receberam clear via CMask para o force do sangue não tocar o RT da luz.
+        if (texture_cache.IsMetaCleared(col_buf.CmaskAddress(), slice)) {
+            for (auto& e : cmask_rts) {
+                if (e == 0 || e == col_buf.Address()) {
+                    e = col_buf.Address();
+                    break;
+                }
+            }
+        }
+        const bool is_cmask_rt = [&] {
+            for (const auto e : cmask_rts) {
+                if (e == col_buf.Address()) {
+                    return true;
+                }
+            }
+            return false;
+        }();
+        // O RT do sangue é usado TODO frame; o da luz é atualizado esporadicamente (mas o
+        // shaft usa-o a cada frame quando a luz está no view). Força o clear só para o
+        // sangue: 1920-wide ADD usado em 2+ frames consecutivos E nunca limpo via CMask.
+        bool blood_rt = false;
+        if (is_add_1920 && !is_cmask_rt) {
+            for (auto& e : rt_use) {
+                if (std::get<0>(e) == 0 || std::get<0>(e) == col_buf.Address()) {
+                    if (std::get<0>(e) == 0) {
+                        std::get<0>(e) = col_buf.Address();
+                        std::get<1>(e) = ~0ull;
+                    }
+                    const bool consecutive = std::get<1>(e) == frame - 1;
+                    std::get<2>(e) = consecutive ? std::get<2>(e) + 1 : 1;
+                    std::get<1>(e) = frame;
+                    blood_rt = std::get<2>(e) >= 2;
+                    break;
+                }
+            }
+        }
+        bool force_clear = false;
+        if (is_volumetric_rt || blood_rt) {
+            for (auto& e : forced_clear) {
+                if (e.first == 0 || e.first == col_buf.Address()) {
+                    if (e.first == 0) {
+                        e.first = col_buf.Address();
+                        e.second = ~0ull;
+                    }
+                    force_clear = e.second != frame;
+                    e.second = frame;
+                    break;
+                }
+            }
+        }
+        // ORDER1886 diag (ORDER1886_BLOOD_DIAG=1): por que a heuristica arma
+        // ou nao na cena atual (throttled 1/300 frames por candidato).
+        // Cobre todo float 1920-wide (nao so ADD) para mapear o padrao real.
+        {
+            static const bool diag = std::getenv("ORDER1886_BLOOD_DIAG") != nullptr;
+            static u64 last_diag_frame = 0;
+            const bool diag_candidate = image->info.size.width == 1920 &&
+                                        col_buf.GetNumberFmt() == AmdGpu::NumberFormat::Float;
+            if (diag && diag_candidate && frame - last_diag_frame >= 300) {
+                last_diag_frame = frame;
+                u32 consec = 0;
+                for (const auto& e : rt_use) {
+                    if (std::get<0>(e) == col_buf.Address()) {
+                        consec = std::get<2>(e);
+                        break;
+                    }
+                }
+                std::printf("ORDER1886 BLOOD-DIAG frame=%llu cb=%#llx %ux%u fmt=%u/%u "
+                            "blend=%u/%u/%u cmask=%d consec=%u blood=%d clear=%d\n",
+                            (unsigned long long)frame,
+                            (unsigned long long)col_buf.Address(), image->info.size.width,
+                            image->info.size.height, (u32)col_buf.GetDataFmt(),
+                            (u32)col_buf.GetNumberFmt(),
+                            (u32)regs.blend_control[0].color_src_factor,
+                            (u32)regs.blend_control[0].color_dst_factor,
+                            (u32)regs.blend_control[0].color_func, (int)is_cmask_rt,
+                            consec, (int)blood_rt, (int)force_clear);
+            }
+        }
+        const bool is_clear =
+            force_clear || texture_cache.IsMetaCleared(col_buf.CmaskAddress(), slice);
         texture_cache.TouchMeta(col_buf.CmaskAddress(), slice, false);
 
         if (reduced) {
@@ -2896,11 +3283,19 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         state.height = std::min<u32>(state.height, std::max(image->info.size.height >> mip, 1u));
         state.num_layers = std::min<u32>(state.num_layers, image_view.info.range.extent.layers);
 
-        const auto clear_value =
-            is_clear ? LiverpoolToVK::ColorBufferClearValue(col_buf) : vk::ClearValue{};
+        const auto clear_value = [&]() {
+            // ORDER1886: o clear forçado da cadeia (heurística) usa PRETO (0 densidade) —
+            // o clear reg do jogo para esses RTs é o default branco e causava piscadas.
+            // O clear por clear-word armado usa o valor do jogo (ColorBufferClearValue).
+            if (force_clear) {
+                return vk::ClearValue{};
+            }
+            return is_clear ? LiverpoolToVK::ColorBufferClearValue(col_buf) : vk::ClearValue{};
+        }();
         auto& attachment = state.color_attachments[cb];
         attachment.image_view = *image_view.image_view;
-        attachment.image_layout = image->backing->state.layout;
+        // ORDER1886 (DrawPipe): leitura sob o mutex de barreiras (Item 09600).
+        attachment.image_layout = runtime.GetBackingLayout(image);
         attachment.clear_value = clear_value.color.uint32;
         attachment.is_clear = is_clear;
 
@@ -2975,7 +3370,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
 
         auto& attachment = state.depth_stencil_attachment;
         attachment.image_view = *image_view.image_view;
-        attachment.image_layout = image.backing->state.layout;
+        // ORDER1886 (DrawPipe): leitura sob o mutex de barreiras (Item 09600).
+        attachment.image_layout = runtime.GetBackingLayout(&image);
         attachment.clear_value = {};
         attachment.is_clear = 0;
 
@@ -3046,7 +3442,9 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
                 auto& depth_image = texture_cache.GetImage(db_desc.first);
                 state.depth_stencil_attachment.image_view =
                     *texture_cache.FindDepthTarget(db_desc.first, db_desc.second).image_view;
-                state.depth_stencil_attachment.image_layout = depth_image.backing->state.layout;
+                // ORDER1886 (DrawPipe): leitura sob o mutex de barreiras (Item 09600).
+                state.depth_stencil_attachment.image_layout =
+                    runtime.GetBackingLayout(&depth_image);
             }
         } else {
             state.width = redirect.width;
@@ -3163,6 +3561,10 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
         if (!buffer_cache.IsRegionGpuModified(address, num_bytes)) {
             u32* buffer = std::bit_cast<u32*>(address);
             std::fill(buffer, buffer + (num_bytes / sizeof(u32)), value);
+            // ORDER1886: o fill de CPU mudou a RAM guest — invalida imagens na região
+            // para re-upload (o clear por DMA da cadeia da volumétrica não chegava à
+            // VRAM e a névoa acumulava).
+            texture_cache.InvalidateMemory(address, num_bytes);
             return;
         }
     }
@@ -3339,8 +3741,12 @@ void Rasterizer::UpdateViewportScissorState() const {
 
     if (regs.polygon_control.enable_window_offset &&
         (regs.window_offset.window_x_offset != 0 || regs.window_offset.window_y_offset != 0)) {
-        LOG_ERROR(Render_Vulkan,
-                  "PA_SU_SC_MODE_CNTL.VTX_WINDOW_OFFSET_ENABLE support is not yet implemented.");
+        // ORDER1886: 1x (dispara por draw nas areas que usam window offset).
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true, std::memory_order_relaxed)) {
+            LOG_ERROR(Render_Vulkan,
+                      "PA_SU_SC_MODE_CNTL.VTX_WINDOW_OFFSET_ENABLE support is not yet implemented.");
+        }
     }
 
     const auto& vp_ctl = regs.viewport_control;
@@ -3453,7 +3859,7 @@ void Rasterizer::UpdateViewportScissorState() const {
 vk::Pipeline Rasterizer::SquarePass(const GraphicsPipeline& pipeline) const {
     const vk::Pipeline square = pipeline.SquarePassHandle();
     static const bool enabled = [] {
-        const char* env = std::getenv("GOW3_SQUARE_PASS");
+        const char* env = std::getenv("ORDER1886_SQUARE_PASS");
         return !env || env[0] != '0';
     }();
     if (!square || !enabled) [[likely]] {
@@ -3716,7 +4122,7 @@ void Rasterizer::NoteFrameStart() {
     // GOW3_BUFFER_STATS=1: how many earlier frames the GPU has not finished when the GPU thread
     // starts a frame — the lag that decides whether guest memory can be read in place.
     static const bool stats = [] {
-        const char* value = std::getenv("GOW3_BUFFER_STATS");
+        const char* value = std::getenv("ORDER1886_BUFFER_STATS");
         return value && value[0] == '1';
     }();
     if (!stats) {

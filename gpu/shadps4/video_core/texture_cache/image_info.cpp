@@ -10,6 +10,8 @@
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/tile.h"
 
+#include <cstdio>
+
 namespace VideoCore {
 
 using namespace Vulkan;
@@ -40,6 +42,11 @@ ImageInfo::ImageInfo(const Libraries::VideoOut::BufferAttributeGroup& group,
     props.is_tiled = attrib.tiling_mode == TilingMode::Tile;
     tile_mode =
         props.is_tiled ? AmdGpu::TileMode::Display2DThin : AmdGpu::TileMode::DisplayLinearAligned;
+    if (u32(tile_mode) == 29) {
+        fprintf(stderr, "ORDER1886_DIAG videoout tile=29 %ux%u fmt=%u addr=0x%llx\n",
+                attrib.width, attrib.height, u32(attrib.pixel_format),
+                (unsigned long long)cpu_address);
+    }
     array_mode = AmdGpu::GetArrayMode(tile_mode);
     pixel_format = ConvertPixelFormat(attrib.pixel_format);
     type = AmdGpu::ImageType::Color2D;
@@ -56,8 +63,20 @@ ImageInfo::ImageInfo(const Libraries::VideoOut::BufferAttributeGroup& group,
 ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint) noexcept {
     props.is_tiled = buffer.IsTiled();
     tile_mode = buffer.GetTileMode();
+    if (u32(tile_mode) == 29) {
+        fprintf(stderr,
+                "ORDER1886_DIAG color tile=29 pitch=%u h=%u fmt=%u/%u samples=%u/%u addr=0x%llx\n",
+                buffer.Pitch(), buffer.Height(), u32(buffer.GetDataFmt()),
+                u32(buffer.GetNumberFmt()), buffer.NumSamples(), buffer.GuestNumSamples(),
+                (unsigned long long)buffer.Address());
+    }
     array_mode = AmdGpu::GetArrayMode(tile_mode);
-    pixel_format = LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt());
+    // ORDER1886: CB pode ter combinação sem mapeamento Vulkan (MRT com lixo); fallback neutro
+    // em vez de assert no SurfaceFormat.
+    pixel_format = LiverpoolToVK::TrySurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt());
+    if (pixel_format == vk::Format::eUndefined) {
+        pixel_format = vk::Format::eR32G32B32A32Sfloat;
+    }
     num_samples = buffer.NumSamples();
     guest_samples = buffer.GuestNumSamples();
     num_bits = NumBitsPerBlock(buffer.GetDataFmt());
@@ -86,6 +105,11 @@ ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
 ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr htile_address,
                      AmdGpu::CbDbExtent hint, bool write_buffer) noexcept {
     tile_mode = buffer.GetTileMode();
+    if (u32(tile_mode) == 29) {
+        fprintf(stderr, "ORDER1886_DIAG depth tile=29 pitch=%u h=%u samples=%u/%u addr=0x%llx\n",
+                buffer.Pitch(), buffer.Height(), buffer.NumSamples(), buffer.GuestNumSamples(),
+                (unsigned long long)buffer.DepthAddress());
+    }
     array_mode = AmdGpu::GetArrayMode(tile_mode);
     pixel_format = LiverpoolToVK::DepthFormat(buffer.z_info.format, buffer.stencil_info.format);
     type = AmdGpu::ImageType::Color2D;
@@ -119,8 +143,12 @@ ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr ht
 
 ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& desc) noexcept {
     tile_mode = image.GetTileMode();
-    array_mode = AmdGpu::GetArrayMode(tile_mode);
-    pixel_format = LiverpoolToVK::SurfaceFormat(image.GetDataFmt(), image.GetNumberFmt());
+    array_mode = AmdGpu::GetArrayMode(tile_mode);    // ORDER1886: T# com combinação sem mapeamento Vulkan; fallback neutro (o guard do
+    // BindTextures já rejeita esses binds, mas outros caminhos do texture cache não).
+    pixel_format = LiverpoolToVK::TrySurfaceFormat(image.GetDataFmt(), image.GetNumberFmt());
+    if (pixel_format == vk::Format::eUndefined) {
+        pixel_format = vk::Format::eR32G32B32A32Sfloat;
+    }
     if (desc.is_depth) {
         pixel_format = LiverpoolToVK::PromoteFormatToDepth(pixel_format);
         props.is_depth = true;
@@ -173,7 +201,19 @@ void ImageInfo::UpdateSize() {
         }
 
         auto& mip_info = mips_layout[mip];
-        if (array_mode == AmdGpu::ArrayMode::ArrayLinearAligned) {
+        if (array_mode == AmdGpu::ArrayMode::ArrayLinearAligned ||
+            array_mode == AmdGpu::ArrayMode::ArrayLinearGeneral) {
+            // ORDER1886: LinearGeneral (tile 31, display/video) caía no
+            // UNREACHABLE abaixo e matava runs longos. A matemática Aligned é
+            // aproximação válida (padding pode divergir; glitch limitado).
+            if (array_mode == AmdGpu::ArrayMode::ArrayLinearGeneral && mip == 0) {
+                static u32 reports = 0;
+                if (reports < 8) {
+                    ++reports;
+                    std::fprintf(stderr, "ORDER1886 LINEAR-GENERAL %ux%u bpp=%u\n",
+                                 size.width, size.height, num_bits);
+                }
+            }
             std::tie(mip_info.pitch, mip_info.height, mip_info.size) =
                 ImageSizeLinearAligned(mip_w, mip_h, num_bits, guest_samples);
         } else if (array_mode == AmdGpu::ArrayMode::ArrayLinearGeneral) {
@@ -185,9 +225,16 @@ void ImageInfo::UpdateSize() {
             const u32 thickness = AmdGpu::GetMicroTileThickness(array_mode);
             mip_d += (-mip_d) & (thickness - 1);
             if (AmdGpu::IsMacroTiled(array_mode)) {
-                ASSERT(!props.is_block);
-                std::tie(mip_info.pitch, mip_info.height, mip_info.size) = ImageSizeMacroTiled(
-                    mip_w, mip_h, thickness, num_bits, guest_samples, tile_mode, mip, alt_tile);
+                if (props.is_block) {
+                    // ORDER1886: T# de lixo com formato BC + tile macro (inválido no
+                    // hardware — BC nunca usa macro tiles); fallback micro em vez de assert.
+                    std::tie(mip_info.pitch, mip_info.height, mip_info.size) =
+                        ImageSizeMicroTiled(mip_w, mip_h, thickness, num_bits, guest_samples);
+                } else {
+                    std::tie(mip_info.pitch, mip_info.height, mip_info.size) =
+                        ImageSizeMacroTiled(mip_w, mip_h, thickness, num_bits, guest_samples,
+                                            tile_mode, mip, alt_tile);
+                }
             } else {
                 std::tie(mip_info.pitch, mip_info.height, mip_info.size) =
                     ImageSizeMicroTiled(mip_w, mip_h, thickness, num_bits, guest_samples);

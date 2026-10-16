@@ -42,7 +42,7 @@ std::string_view BufferTypeName(MemoryType type) {
 enum class StreamPlacement { Device, Host, Cached };
 static StreamPlacement StreamMemory() {
     static const StreamPlacement placement = [] {
-        const char* env = std::getenv("GOW3_STREAM_MEMORY");
+        const char* env = std::getenv("ORDER1886_STREAM_MEMORY");
         const std::string_view value = env ? env : "cached";
         if (value == "device") {
             return StreamPlacement::Device;

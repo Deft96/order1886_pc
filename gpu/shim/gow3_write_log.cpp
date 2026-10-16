@@ -38,7 +38,7 @@ void Record(std::uint64_t address, const void* data, std::uint64_t size, Source 
 
 int Mode() {
     static const int mode = [] {
-        const char* env = std::getenv("GOW3_WRITE_LOG");
+        const char* env = std::getenv("ORDER1886_WRITE_LOG");
         return env ? std::atoi(env) : 0;
     }();
     return mode;

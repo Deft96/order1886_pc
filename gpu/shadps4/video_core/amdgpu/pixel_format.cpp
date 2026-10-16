@@ -74,7 +74,9 @@ std::string_view NameOf(DataFormat fmt) {
     case DataFormat::FormatBc7:
         return "FormatBc7";
     default:
-        UNREACHABLE();
+        // ORDER1886: T# de lixo (gaps reservados, ex: 15/28) chega aqui via logs do
+        // recompiler — nunca crashar por formatar; o GetFormat tem fallback próprio.
+        return "Unknown";
     }
 }
 
@@ -107,7 +109,8 @@ std::string_view NameOf(NumberFormat fmt) {
     case NumberFormat::Ubscaled:
         return "Unscaled";
     default:
-        UNREACHABLE();
+        // ORDER1886: idem — NumberFormat de 4 bits com valores sem nome (14/15).
+        return "Unknown";
     }
 }
 

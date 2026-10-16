@@ -22,7 +22,7 @@ SceneTargets::SceneTargets(const Instance& i, Scheduler& s, Runtime& r,
 SceneTargets::SceneTargets(const Instance& i, Scheduler& s, Runtime& r, Lookup get)
     : instance{i}, scheduler{s}, runtime{r}, lookup{std::move(get)} {
     runtime.scene_targets = this;
-    const char* force = std::getenv("GOW3_SCENE_STENCIL_BITS");
+    const char* force = std::getenv("ORDER1886_SCENE_STENCIL_BITS");
     force_stencil_bits = force && force[0] == '1';
     CreateResampleResources();
 }

@@ -80,7 +80,7 @@ static size_t jobs_run, frames_decoded, batches_run;
 /* GOW3_AUDIO_TRACE=1: instance configurations and jobs that return a non-zero result. */
 static int trace_left=-1;
 static int ajm_trace(void) {
-    if (trace_left<0) { const char *e=getenv("GOW3_AUDIO_TRACE"); trace_left=e && e[0]=='1' ? 400 : 0; }
+    if (trace_left<0) { const char *e=getenv("ORDER1886_AUDIO_TRACE"); trace_left=e && e[0]=='1' ? 400 : 0; }
     return trace_left>0 && trace_left--;
 }
 static uint32_t ident(uint32_t word) { return word & 0x3f; }
@@ -454,13 +454,8 @@ static ABI int32_t ajm_initialize(int64_t reserved, uint32_t *out) {
     return ERR_OUT_OF_RESOURCES;
 }
 static ABI int32_t ajm_finalize(uint32_t id) {
-    pthread_mutex_lock(&lock);
-    Context *c=context(id);
-    if (!c) { pthread_mutex_unlock(&lock); return ERR_INVALID_CONTEXT; }
-    for (int i=0;i<=MAX_INSTANCES;++i) instance_release(&c->instances[i]);
-    free(c); contexts[id]=NULL;
-    pthread_mutex_unlock(&lock);
-    return 0;
+    fprintf(stderr,"Runtime: sceAjmFinalize(%u) ignored (keep-alive experiment)\n",id);
+    (void)id; return 0;
 }
 static ABI int32_t ajm_module_register(uint32_t id, uint32_t codec, int64_t reserved) {
     if (reserved || codec>=24) return ERR_INVALID_PARAMETER;
@@ -472,12 +467,8 @@ static ABI int32_t ajm_module_register(uint32_t id, uint32_t codec, int64_t rese
     return r;
 }
 static ABI int32_t ajm_module_unregister(uint32_t id, uint32_t codec) {
-    pthread_mutex_lock(&lock);
-    Context *c=context(id);
-    int32_t r=!c ? ERR_INVALID_CONTEXT : codec>=24 ? ERR_INVALID_PARAMETER : !c->registered[codec] ? ERR_NOT_REGISTERED : 0;
-    if (!r) c->registered[codec]=0;
-    pthread_mutex_unlock(&lock);
-    return r;
+    fprintf(stderr,"Runtime: sceAjmModuleUnregister(%u,%u) ignored (keep-alive experiment)\n",id,codec);
+    (void)id; (void)codec; return 0;
 }
 static ABI int32_t ajm_instance_create(uint32_t id, uint32_t codec, uint64_t flags, uint32_t *out) {
     if (!out || codec>=24) return ERR_INVALID_PARAMETER;

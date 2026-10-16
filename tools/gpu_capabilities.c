@@ -128,7 +128,7 @@ int main(int argc, char **argv) {
     }
     /* Match vk_instance.cpp: its default ranking, or the GOW3_GPU_ID index while it exists. */
     VkPhysicalDevice selected = devices[0];
-    const char *gpu_id = getenv("GOW3_GPU_ID");
+    const char *gpu_id = getenv("ORDER1886_GPU_ID");
     const unsigned long index = gpu_id && atoi(gpu_id) >= 0 ? strtoul(gpu_id, NULL, 10) : count;
     if (gpu_id && atoi(gpu_id) >= 0 && index >= count)
         fputs("GPU: GOW3_GPU_ID is outside the device list; choosing automatically\n", stderr);

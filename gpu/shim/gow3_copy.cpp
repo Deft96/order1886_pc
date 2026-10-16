@@ -27,7 +27,7 @@ public:
         // Copies are on the critical path (fences wait for them): normal priority, a quarter
         // of the hardware threads available to the process (Steam Deck 2).
         unsigned count = std::clamp(Gow3Threads::Available() / 4, 1u, 4u);
-        if (const char* env = std::getenv("GOW3_COPY_THREADS")) {
+        if (const char* env = std::getenv("ORDER1886_COPY_THREADS")) {
             count = static_cast<unsigned>(std::clamp(std::atoi(env), 0, 16));
         }
         epochs.emplace_back();

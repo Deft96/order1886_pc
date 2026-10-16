@@ -200,8 +200,8 @@ static void load_button_maps(void) {
     static bool loaded;
     if (loaded) return;
     loaded=true;
-    const int pad=apply_button_map(&pad_map,getenv("GOW3_PAD_MAP"),false);
-    const int keys=apply_button_map(&key_map,getenv("GOW3_KEY_MAP"),true);
+    const int pad=apply_button_map(&pad_map,getenv("ORDER1886_PAD_MAP"),false);
+    const int keys=apply_button_map(&key_map,getenv("ORDER1886_KEY_MAP"),true);
     if (pad || keys) printf("Runtime: pad map: %d gamepad and %d keyboard buttons remapped\n",pad,keys);
 }
 
@@ -263,7 +263,7 @@ static int replay_armed;      /* 1 while a GOW3_PAD_REPLAY recording plays, 2 on
 static uint64_t replay_start; /* 0: (re)start at the next sample */
 static void read_inject(void) {
     static const char *path; static int checked; static uint64_t last_check; static struct timespec mtime;
-    if (!checked) { path=getenv("GOW3_PAD_FILE"); checked=1; }
+    if (!checked) { path=getenv("ORDER1886_PAD_FILE"); checked=1; }
     if (!path || !*path) return;
     uint64_t now=now_us();
     if (now-last_check<20000) return;
@@ -303,7 +303,7 @@ static uint64_t record_start;
 static PadSample record_last;
 static void record_sample(const PadData *d) {
     static const char *path; static int checked, f9_was_down;
-    if (!checked) { path=getenv("GOW3_PAD_RECORD"); checked=1; }
+    if (!checked) { path=getenv("ORDER1886_PAD_RECORD"); checked=1; }
     if (!path || !*path || !sdl_ready) return;
     const bool *k=SDL_GetKeyboardState(NULL);
     const int f9=k && k[SDL_SCANCODE_F9];
@@ -335,7 +335,7 @@ static void replay_sample(PadData *d) {
         static int loaded;
         if (!loaded) {
             loaded=1;
-            const char *path=getenv("GOW3_PAD_REPLAY");
+            const char *path=getenv("ORDER1886_PAD_REPLAY");
             FILE *f=path ? fopen(path,"r") : NULL;
             PadSample s; unsigned v[8]; size_t cap=0;
             while (f && fscanf(f,"%u %u %u %u %u %u %u %u",&v[0],&v[1],&v[2],&v[3],&v[4],&v[5],&v[6],&v[7])==8) {
@@ -433,9 +433,7 @@ static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (!param) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
     SDL_Gamepad *g=current_gamepad();
-    /* The menu's vibration strength scales the game's motors (0: off). */
-    const unsigned percent=(unsigned)gow3gpu_vibration_percent();
-    if (g) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257u*percent/100u),(uint16_t)(param[1]*257u*percent/100u),1000);
+    if (g) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
     pthread_mutex_unlock(&lock);
     return 0;
 }

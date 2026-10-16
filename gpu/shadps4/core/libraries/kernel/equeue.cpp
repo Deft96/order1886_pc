@@ -61,6 +61,13 @@ bool EqueueInternal::AddEvent(EqueueEvent& event) {
         if (event.event.filter == OrbisKernelEvent::Filter::Timer) {
             // Set timer interval, this is stored in milliseconds for timers.
             event.timer_interval = std::chrono::milliseconds(event.event.data);
+            // ORDER1886 diag: the particle systems' gate (ORDER1886_TIMER_TRACE=1).
+            static unsigned timer_adds;
+            if (std::getenv("ORDER1886_TIMER_TRACE") && timer_adds++ < 200) {
+                std::printf("EQ-TIMER add ident=%llu interval_ms=%llu\n",
+                            static_cast<unsigned long long>(event.event.ident),
+                            static_cast<unsigned long long>(event.event.data));
+            }
         } else if (event.event.filter == OrbisKernelEvent::Filter::HrTimer) {
             // Retrieve inputted time, this is stored in the bintime format.
             OrbisKernelBintime* time = reinterpret_cast<OrbisKernelBintime*>(event.event.data);
@@ -173,6 +180,14 @@ bool EqueueInternal::RemoveEvent(u64 id, s16 filter) {
 }
 
 int EqueueInternal::WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKernelUseconds* timo) {
+    // ORDER1886 diag: the waits with a timeout (ORDER1886_TIMER_TRACE=1) — the game's update gates.
+    static unsigned waits;
+    const bool trace_this = std::getenv("ORDER1886_TIMER_TRACE") && timo && waits++ < 400;
+    if (trace_this) {
+        std::printf("EQ-WAIT timeout_us=%u\n", *timo);
+    }
+    const auto t0 = trace_this ? std::chrono::steady_clock::now()
+                               : std::chrono::steady_clock::time_point{};
     if (timo != nullptr && *timo == 0) {
         // Effectively acts as a poll; only events that have already
         // arrived at the time of this function call can be received
@@ -202,6 +217,13 @@ int EqueueInternal::WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKern
         m_cond.wait_for(lock, std::chrono::microseconds(micros), predicate);
     }
 
+    if (trace_this) {
+        const auto elapsed_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0)
+                .count();
+        std::printf("EQ-WAIT result count=%d elapsed_us=%lld\n", count,
+                    static_cast<long long>(elapsed_us));
+    }
     return count;
 }
 

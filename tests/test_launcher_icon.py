@@ -21,7 +21,7 @@ try:
 except ImportError:
     PILLOW = False
 
-OWN_ICON = ROOT / 'launcher' / 'gow3.png'
+OWN_ICON = ROOT / 'launcher' / 'order1886.png'
 WM_GETICON, ICON_SMALL, ICON_BIG = 0x7F, 0, 1
 
 

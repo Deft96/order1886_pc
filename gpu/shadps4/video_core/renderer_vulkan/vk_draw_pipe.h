@@ -108,8 +108,7 @@ public:
         }
         ++drains;
         const u32 slot = reason < NumReasons ? reason : ReasonRasterizer;
-        ++drains_by_reason[slot];
-        const u64 start = __rdtsc();
+        ++drains_by_reason[slot];        const u64 start = __rdtsc();
         for (u32 spins = 0; consumed.load(std::memory_order_acquire) != head; ++spins) {
             if (spins < 4096) {
                 __builtin_ia32_pause();
@@ -120,6 +119,20 @@ public:
         const u64 waited = __rdtsc() - start;
         drain_cycles += waited;
         cycles_by_reason[slot] += waited;
+    }
+
+    /// ORDER1886 (DrawPipe): any thread (swap/present): waits until stage B has run
+    /// every packet committed so far (snapshot; later packets are not waited for).
+    /// Unlike Drain(), safe off stage A: only atomics, no stats, takes no locks.
+    void DrainPosted() {
+        const u64 posted = published.load(std::memory_order_acquire);
+        for (u32 spins = 0; consumed.load(std::memory_order_acquire) < posted; ++spins) {
+            if (spins < 4096) {
+                __builtin_ia32_pause();
+            } else {
+                std::this_thread::yield();
+            }
+        }
     }
 
     /// Stage A: position after the last committed packet; Reached(position) once B ran it.
@@ -169,7 +182,7 @@ private:
                 // With few hardware threads (Steam Deck: 8) a long spin takes time from the
                 // game's own threads. GOW3_PIPE_SPIN_US overrides.
                 static const auto spin_time = std::chrono::microseconds([] {
-                    if (const char* env = std::getenv("GOW3_PIPE_SPIN_US")) {
+                    if (const char* env = std::getenv("ORDER1886_PIPE_SPIN_US")) {
                         return std::max(0, std::atoi(env));
                     }
                     return Gow3Threads::Available() >= 12 ? 200 : 50;

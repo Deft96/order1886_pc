@@ -55,7 +55,7 @@ FfxVkPortableImage Describe(vk::Image image, vk::Format format, u32 width, u32 h
 /// <dir>/fNNN_<name>_<w>x<h>_<format>.raw, for checking temporal stability offline.
 /// Returns the frame number to dump, or -1.
 int DumpFrame() {
-    static const char* trigger = std::getenv("GOW3_DUMP_TRIGGER");
+    static const char* trigger = std::getenv("ORDER1886_DUMP_TRIGGER");
     static int remaining = 0, index = 0, polls = 0;
     if (!trigger) {
         return -1;
@@ -64,7 +64,7 @@ int DumpFrame() {
         if (++polls % 30 != 0 || std::remove(trigger) != 0) {
             return -1;
         }
-        const char* frames = std::getenv("GOW3_DUMP_FRAMES");
+        const char* frames = std::getenv("ORDER1886_DUMP_FRAMES");
         remaining = frames ? std::max(1, std::atoi(frames)) : 8;
         index = 0;
     }
@@ -85,7 +85,7 @@ struct DumpImage {
 void DumpImages(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
                 int frame, std::initializer_list<DumpImage> images) {
     static const std::string dir = [] {
-        const char* env = std::getenv("GOW3_DUMP_DIR");
+        const char* env = std::getenv("ORDER1886_DUMP_DIR");
         return std::string{env && env[0] ? env : "out/dump"};
     }();
     const vk::MemoryBarrier2 before{
@@ -173,15 +173,15 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
         Gow3Settings::ConfigureDlssSupport(dlss && dlss->Available(), problem.c_str());
     }
     // Available unless GOW3_UPSCALER=none; on/off and the parameters are the menu's settings.
-    const char* env = std::getenv("GOW3_UPSCALER");
+    const char* env = std::getenv("ORDER1886_UPSCALER");
     enabled = !(env && std::strcmp(env, "none") == 0);
-    if (const char* hash = std::getenv("GOW3_UPSCALE_BEFORE_CS")) {
+    if (const char* hash = std::getenv("ORDER1886_UPSCALE_BEFORE_CS")) {
         trigger_hash = std::strtoull(hash, nullptr, 16);
     }
-    if (const char* hash = std::getenv("GOW3_UI_TRIGGER_VS")) {
+    if (const char* hash = std::getenv("ORDER1886_UI_TRIGGER_VS")) {
         ui_trigger_vs = std::strtoull(hash, nullptr, 16);
     }
-    if (const char* res = std::getenv("GOW3_OUTPUT_RES")) {
+    if (const char* res = std::getenv("ORDER1886_OUTPUT_RES")) {
         u32 w = 0, h = 0;
         if (std::sscanf(res, "%ux%u", &w, &h) == 2 && w && h) {
             target_width = w;
@@ -190,10 +190,10 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     }
     // Explicit resolution overrides retain the old compatibility path. Normal presets
     // keep guest allocations/UI native and change only host raster targets at frame boundaries.
-    scaled_session = std::getenv("GOW3_RENDER_RES") && std::getenv("GOW3_RENDER_RES")[0];
+    scaled_session = std::getenv("ORDER1886_RENDER_RES") && std::getenv("ORDER1886_RENDER_RES")[0];
     render_width = 1920;
     render_height = 1080;
-    if (const char* res = std::getenv("GOW3_RENDER_RES")) {
+    if (const char* res = std::getenv("ORDER1886_RENDER_RES")) {
         u32 w = 0, h = 0;
         if (std::sscanf(res, "%ux%u", &w, &h) == 2 && w && h) {
             render_width = w;
@@ -268,7 +268,7 @@ bool TemporalUpscaler::RasterScaling() const {
 bool TemporalUpscaler::OnFrameStart() {
     // gow3: GOW3_PRESET_FILE=<file> holding a preset number, read about once a second: switches
     // the preset like the menu does (scripted tests of live preset changes).
-    static const char* preset_file = std::getenv("GOW3_PRESET_FILE");
+    static const char* preset_file = std::getenv("ORDER1886_PRESET_FILE");
     if (preset_file && ++preset_file_frames % 64 == 0) {
         if (FILE* f = std::fopen(preset_file, "r")) {
             int value = 0;
@@ -678,8 +678,8 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
         std::array<float, 2> jitter;
         u32 reset, pad;
         std::array<std::array<float, 4>, 3> depth;
-    } params{jitter, reset ? 1u : 0u, std::getenv("GOW3_TAA_DIAGNOSTICS") ?
-                 u32(std::clamp(std::atoi(std::getenv("GOW3_TAA_DIAGNOSTICS")),1,3)) : 0u,
+    } params{jitter, reset ? 1u : 0u, std::getenv("ORDER1886_TAA_DIAGNOSTICS") ?
+                 u32(std::clamp(std::atoi(std::getenv("ORDER1886_TAA_DIAGNOSTICS")),1,3)) : 0u,
              camera_motion.TaaDepthParameters()};
     // Optional techniques for A/B in one run (GOW3_TOGGLE_FILE bits 51-54): tonemapped blending,
     // YCoCg clipping, variance clipping, 3x3 reconstruction. Measured in game on 2026-10-02
@@ -1670,7 +1670,7 @@ void TemporalUpscaler::RunScaled() {
                            {{depth_image, source_width, source_height, 4, "depth", "f32",
                              vk::ImageAspectFlagBits::eDepth}});
                 if (Gow3Settings::Get().upscaler == Gow3Settings::UpscalerTaa &&
-                    std::getenv("GOW3_TAA_DIAGNOSTICS")) {
+                    std::getenv("ORDER1886_TAA_DIAGNOSTICS")) {
                     DumpImages(instance, scheduler, cmdbuf, dump,
                                {{vk::Image(taa_history[taa_next]),ow,oh,16,
                                  "previous_history","rgba32f"},
@@ -1898,9 +1898,9 @@ bool TemporalUpscaler::DisplayOverride(VAddr address, Display& display) {
     display = {vk::Image(it->second.image), it->second.format, it->second.width, it->second.height};
     // Diagnostic capture of the actual completed display buffer, including native UI.
     // GOW3_PRESENT_DUMP_COUNT=N: the trigger dumps N consecutive frames (temporal stability).
-    static const char* dump = std::getenv("GOW3_PRESENT_DUMP_TRIGGER");
+    static const char* dump = std::getenv("ORDER1886_PRESENT_DUMP_TRIGGER");
     static const int dump_count = [] {
-        const char* env = std::getenv("GOW3_PRESENT_DUMP_COUNT");
+        const char* env = std::getenv("ORDER1886_PRESENT_DUMP_COUNT");
         return env ? std::max(1, std::atoi(env)) : 1;
     }();
     static int dump_index = 0;

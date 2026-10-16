@@ -256,6 +256,9 @@ static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
     set_host_name(t->name);
+#ifdef _WIN32
+    printf("Runtime: guest thread '%s' running (tid=%lu)\n",t->name,GetCurrentThreadId());
+#endif
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();
     pthread_mutex_lock(&lock); t->finished=1; ++exited; pthread_mutex_unlock(&lock);
@@ -307,6 +310,7 @@ static ABI int32_t thread_join(GuestThread *t,void **result) {
     int e=pthread_join(t->host,&value);
     if (e) { fprintf(stderr,"STOP: host pthread_join failed: %d\n",e); exit(21); }
     if (result) *result=t->result;
+    if (getenv("ORDER1886_TRACE_IMPORTS")) fprintf(stderr,"Runtime: joined thread '%s' result=%p\n",t->name,t->result);
     pthread_mutex_lock(&lock); ++joined_count; pthread_mutex_unlock(&lock);
     return 0;
 }

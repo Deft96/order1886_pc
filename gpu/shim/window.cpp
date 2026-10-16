@@ -30,7 +30,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_DestroyProperties(props);
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
     // gow3: the game's own icon (run.py converts sce_sys/icon0.png to BMP, SDL's built-in format).
-    if (const char* icon_path = std::getenv("GOW3_WINDOW_ICON")) {
+    if (const char* icon_path = std::getenv("ORDER1886_WINDOW_ICON")) {
         if (SDL_Surface* icon = SDL_LoadBMP(icon_path)) {
             SDL_SetWindowIcon(window, icon);
             SDL_DestroySurface(icon);
@@ -57,7 +57,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
         UNREACHABLE_MSG("Unsupported SDL video driver {}", driver ? driver : "(none)");
     }
     // gow3: GOW3_FULLSCREEN=1 (older launchers) still asks for fullscreen.
-    if (const char* fullscreen = std::getenv("GOW3_FULLSCREEN"); fullscreen && fullscreen[0] == '1' &&
+    if (const char* fullscreen = std::getenv("ORDER1886_FULLSCREEN"); fullscreen && fullscreen[0] == '1' &&
         Gow3Settings::Get().display_mode == Gow3Graphics::Windowed) {
         Gow3Settings::Get().display_mode = Gow3Graphics::Borderless;
     }

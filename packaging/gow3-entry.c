@@ -23,7 +23,7 @@ static void drop(const char* name) {
     }
     // Kept for diagnostics (the launcher's log shows the environment problems).
     char saved[128];
-    snprintf(saved, sizeof saved, "GOW3_HOST_%s", name);
+    snprintf(saved, sizeof saved, "ORDER1886_HOST_%s", name);
     setenv(saved, value, 1);
     unsetenv(name);
 }

@@ -376,7 +376,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                                       instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         // gow3: older NVIDIA (Pascal) has no barycentrics; GOW3_INTERP_INT_FIX=0/1 overrides.
         .needs_integer_interpolation_fix = [&] {
-            if (const char* env = std::getenv("GOW3_INTERP_INT_FIX")) {
+            if (const char* env = std::getenv("ORDER1886_INTERP_INT_FIX")) {
                 return env[0] == '1';
             }
             return !instance.IsFragmentShaderBarycentricSupported() &&
@@ -902,7 +902,7 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         // GOW3_MOTION_SELECT_LOG=1: each G-buffer vertex shader once, with its buffer sizes
         // and the selection, to find animated models that the size rule leaves out.
         static const bool select_log = [] {
-            const char* value = std::getenv("GOW3_MOTION_SELECT_LOG");
+            const char* value = std::getenv("ORDER1886_MOTION_SELECT_LOG");
             return value && value[0] == '1';
         }();
         if (select_log && vs) {
@@ -923,7 +923,7 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         }
         // Keep the old broad path available for visual A/B tests.
         static const bool all_motion = [] {
-            const char* value = std::getenv("GOW3_OBJECT_MOTION_ALL");
+            const char* value = std::getenv("ORDER1886_OBJECT_MOTION_ALL");
             return value && value[0] == '1';
         }();
         if (all_motion) {
@@ -1118,8 +1118,14 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
             ASSERT_MSG(vertex_binding < MaxVertexBufferCount,
                        "Vertex attribute binding count exceeded limit: {} >= {}", vertex_binding,
                        MaxVertexBufferCount);
-            key.vertex_buffer_formats[vertex_binding++] =
-                Vulkan::LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt());
+            // ORDER1886: V# pode ter formato sem mapeamento Vulkan (lixo); fallback neutro.
+            vk::Format vfmt =
+                Vulkan::LiverpoolToVK::TrySurfaceFormat(buffer.GetDataFmt(),
+                                                        buffer.GetNumberFmt());
+            if (vfmt == vk::Format::eUndefined) {
+                vfmt = vk::Format::eR32G32B32A32Sfloat;
+            }
+            key.vertex_buffer_formats[vertex_binding++] = vfmt;
         }
     }
 

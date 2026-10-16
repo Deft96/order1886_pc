@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<Patch>
+    <TitleID>
+        <ID>CUSA00035</ID>
+        <ID>CUSA00070</ID>
+        <ID>CUSA00076</ID>
+        <ID>CUSA00100</ID>
+        <ID>CUSA00670</ID>
+        <ID>CUSA00785</ID>
+    </TitleID>
+    <Metadata Title="The Order: 1886" Name="Particle Fix - VSync Off (Flip Rate 1)" isEnabled="true" Note="Sets the game's sync interval to 1 (flip every vblank): the particle effects (bubbles, splashes, blood) run at twice their default rate. The port's in-game frame limit keeps the pace." PatchVer="1.0" AppVer="01.02" AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x008507c4" Value="01" Pattern="C7 05 ?? ?? ?? ?? 02 00 00 00 49 8B 07 48 3B 45 E0" At="6"/>
+        </PatchList>
+    </Metadata>
+</Patch>

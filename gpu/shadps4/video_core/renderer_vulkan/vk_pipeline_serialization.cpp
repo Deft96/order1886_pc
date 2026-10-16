@@ -513,7 +513,7 @@ struct PipelineCache::WarmupPool {
         return jobs.empty() && !running;
     }
     static u32 Threads() {
-        const char* env = std::getenv("GOW3_PARALLEL_WARMUP");
+        const char* env = std::getenv("ORDER1886_PARALLEL_WARMUP");
         if (!env || !*env || *env == '0') {
             return 0;
         }

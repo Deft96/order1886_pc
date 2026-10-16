@@ -105,6 +105,8 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 BufferCache::~BufferCache() = default;
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
+    // ORDER1886: RAM/host muda — invalida o memo de arena.
+    BumpObtainVersion();
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
         ReadMemory(device_addr, size, true, assume_locks);
     });
@@ -136,7 +138,7 @@ void BufferCache::SmallGuestCopy(const Gow3Copy::Item& item) {
 
 void BufferCache::ExtendWriteFault(VAddr device_addr) {
     static const u64 window = [] {
-        const char* env = std::getenv("GOW3_FAULT_WINDOW");
+        const char* env = std::getenv("ORDER1886_FAULT_WINDOW");
         const u64 kib = env ? std::strtoull(env, nullptr, 10) : 256;
         return std::bit_ceil(std::clamp<u64>(kib, 4, 1024)) * 1024;
     }();
@@ -147,6 +149,8 @@ void BufferCache::ExtendWriteFault(VAddr device_addr) {
 }
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
+    // ORDER1886: como InvalidateMemory (DownloadMemory + MarkRegionAsCpuModified).
+    BumpObtainVersion();
     const auto flush_request = [this, device_addr, size, is_write] {
         const u32 first_block = device_addr >> block_shift;
         const u32 last_block = (device_addr + size - 1) >> block_shift;
@@ -173,6 +177,8 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
 }
 
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
+    // ORDER1886: writeback na RAM + unmark — invalida o memo de arena.
+    BumpObtainVersion();
     boost::container::small_vector<vk::BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     const VAddr arena_base = arena->cpu_addr;
@@ -250,7 +256,7 @@ u64 RegionKey(VAddr address) {
 }
 bool BufferStatsEnabled() {
     static const bool enabled = [] {
-        const char* value = std::getenv("GOW3_BUFFER_STATS");
+        const char* value = std::getenv("ORDER1886_BUFFER_STATS");
         return value && value[0] == '1';
     }();
     return enabled;
@@ -296,7 +302,8 @@ void PrintBufferStats() {
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer) {
-    texture_cache.ResolveReadbacks(device_addr, size, true, ReadbackSource::BufferObtain);
+    const bool readback_work = texture_cache.ResolveReadbacks(
+        device_addr, size, true, ReadbackSource::BufferObtain);
     const bool stats = BufferStatsEnabled();
     if (stats) {
         PrintBufferStats();
@@ -330,6 +337,21 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         stream_buffer.Commit();
         return {&stream_buffer, offset};
     }
+    // ORDER1886: memo de binds de arena (ver buffer_cache.h). So leitura, sem texel
+    // (frescura vem das imagens, sem versao) e sem readback novo (RAM mudou).
+    // A escrita invalida p/ leituras seguintes e segue o caminho cheio.
+    if (is_written) {
+        BumpObtainVersion();
+    } else if (!is_texel_buffer && !readback_work) {
+        std::scoped_lock lock{obtain_memo_mutex};
+        const u64 ver = obtain_version.load(std::memory_order_relaxed);
+        const auto it = obtain_memo.find({device_addr, size});
+        if (it != obtain_memo.end() && it->second.version == ver) {
+            Gow3Stats::obtain_hits.fetch_add(1, std::memory_order_relaxed);
+            return {it->second.buffer, it->second.offset};
+        }
+        Gow3Stats::obtain_misses.fetch_add(1, std::memory_order_relaxed);
+    }
     const u64 first_block = device_addr >> block_shift;
     const u64 last_block = (device_addr + size - 1) >> block_shift;
     const auto* arena = GetArena(first_block, last_block);
@@ -345,6 +367,11 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     }
     if (is_written) {
         gpu_modified_ranges.Add(device_addr, size);
+    }
+    if (!is_written && !is_texel_buffer && !readback_work) {
+        std::scoped_lock lock{obtain_memo_mutex};
+        obtain_memo[{device_addr, size}] = {arena, arena->Offset(device_addr),
+                                            obtain_version.load(std::memory_order_relaxed)};
     }
     return {arena, arena->Offset(device_addr)};
 }
@@ -426,6 +453,8 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
 
     LOG_WARNING(Render, "Migrating arena");
 
+    // ORDER1886: a migração troca o Buffer* dos ranges — invalida o memo de arena.
+    BumpObtainVersion();
     const u64 first_addr = first_arena ? first_arena->cpu_addr : (first_page << arena_page_bits);
     const u64 first_size = first_arena ? first_arena->size_bytes : arena_page_size;
     const u64 last_size = last_arena ? last_arena->size_bytes : arena_page_size;
@@ -541,6 +570,8 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
     if (copies.empty()) {
         return nullptr;
     }
+    // ORDER1886: upload muda bytes/freshness — invalida o memo de arena.
+    BumpObtainVersion();
     // Resolve before launching host copies: a copy-thread fault could deadlock submission.
     for (const auto& copy : copies) {
         texture_cache.ResolveReadbacks(copy.dstOffset, copy.size, true, ReadbackSource::BufferUpload);
@@ -623,6 +654,7 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
         if (*type == TextureCache::MetaType::HTile) {
             static constexpr u32 ZmaskUncompressed = 0xf;
             runtime.FillBuffer(arena, arena->Offset(device_addr), size, ZmaskUncompressed);
+            BumpObtainVersion();
             return true;
         } else {
             LOG_WARNING(Render_Vulkan, "Unhandled metadata type {}", magic_enum::enum_name(*type));
@@ -676,6 +708,7 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
     }
     auto& tile_manager = texture_cache.GetTileManager();
     tile_manager.TileImage(image, buffer_copies, arena, arena_offset);
+    BumpObtainVersion();
     return true;
 }
 
@@ -712,7 +745,7 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     };
 
     info.AddWait(signal_sema, signal_tick);
-    auto submit_result = instance.GetSparseQueue().bindSparse(sparse_info);
+    auto submit_result = instance.GetGraphicsQueue().bindSparse(sparse_info);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
     pending_binds.clear();

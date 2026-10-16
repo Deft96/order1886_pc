@@ -22,7 +22,7 @@ namespace Vulkan {
 namespace {
 
 std::string AssetDir() {
-    const char* dir = std::getenv("GOW3_FSR4_DIR");
+    const char* dir = std::getenv("ORDER1886_FSR4_DIR");
     return dir && dir[0] ? dir : "fsr4_shaders";
 }
 
@@ -122,7 +122,7 @@ struct Fsr4Upscaler::Impl {
         std::vector<u8> initializer, weights;
         // gow3: tools/fsr4_optimize.sh puts fixed or faster passes into opt/ (post through
         // shared memory, pass 11 without out-of-bounds writes); GOW3_FSR4_OPT=0 keeps the originals.
-        const char* opt_env = std::getenv("GOW3_FSR4_OPT");
+        const char* opt_env = std::getenv("ORDER1886_FSR4_OPT");
         const bool use_opt = !(opt_env && opt_env[0] == '0');
         u32 optimized = 0;
         const auto load = [&](const char* name, std::vector<u8>& data) {
@@ -237,7 +237,7 @@ struct Fsr4Upscaler::Impl {
             return false;
         }
         if (!fsr411) {
-            const char* env = std::getenv("GOW3_FSR411_DIR");
+            const char* env = std::getenv("ORDER1886_FSR411_DIR");
             fsr411 = std::make_unique<Fsr411::Upscaler>(instance.GetPhysicalDevice(), instance.GetDevice(),
                                                         env && env[0] ? env : "fsr4_411");
         }

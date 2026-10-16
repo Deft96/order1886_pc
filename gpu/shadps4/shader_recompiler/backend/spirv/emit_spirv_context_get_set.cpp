@@ -71,6 +71,25 @@ Id EmitReadConst(EmitContext& ctx, IR::Inst* inst, Id addr, Id offset) {
 
 Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index) {
     const auto& buffer = ctx.buffers[handle];
+    const auto& desc = ctx.info.buffers[handle];
+    const auto vsharp = desc.GetSharp(ctx.info);
+    if (vsharp.GetElementSize() == 2 && Sirit::ValidId(buffer.Offset(PointerSize::B16))) {
+        // ORDER1886 (port de TdlifePeng 7d8d5af): buffer com elementos de 2 bytes e base
+        // guest só 2-byte alinhada — o índice dword (>>2) perderia a precisão. Lê via
+        // U16 words: dword_index*2 + word_offset, montando o U32 com lo | (hi << 16).
+        const Id word_index = ctx.OpIAdd(
+            ctx.U32[1], ctx.OpShiftLeftLogical(ctx.U32[1], index, ctx.ConstU32(1U)),
+            buffer.Offset(PointerSize::B16));
+        const auto [id, ptr_type] = buffer.Alias(PointerType::U16);
+        const Id lo = ctx.OpLoad(ctx.U16, ctx.OpAccessChain(ptr_type, id, ctx.u32_zero_value,
+                                                            word_index));
+        const Id hi = ctx.OpLoad(ctx.U16, ctx.OpAccessChain(ptr_type, id, ctx.u32_zero_value,
+                                                            ctx.OpIAdd(ctx.U32[1], word_index,
+                                                                       ctx.ConstU32(1U))));
+        const Id hi32 =
+            ctx.OpShiftLeftLogical(ctx.U32[1], ctx.OpUConvert(ctx.U32[1], hi), ctx.ConstU32(16U));
+        return ctx.OpBitwiseOr(ctx.U32[1], ctx.OpUConvert(ctx.U32[1], lo), hi32);
+    }
     if (const Id offset = buffer.Offset(PointerSize::B32); Sirit::ValidId(offset)) {
         index = ctx.OpIAdd(ctx.U32[1], index, offset);
     }
