@@ -1,4 +1,4 @@
-# The Order: 1886 for PC (order1886_pc)
+# The Order: 1886 for PC
 
 A Work in progress (W.I.P) native Windows port of The Order: 1886 (PS4), running the game's
 own x86-64 code directly with a reimplemented Orbis OS and a GNM-to-Vulkan translation layer.
@@ -187,3 +187,7 @@ The Order: 1886 is a trademark of Sony Interactive Entertainment.
 ## License
 
 GNU GPL v2 or later (`LICENSE`). Third-party components keep their own licenses.
+
+## Wanna buy me a coffe? I'd appreciate it a lot!
+
+https://ko-fi.com/odefas <3
