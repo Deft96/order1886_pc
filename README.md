@@ -188,6 +188,5 @@ The Order: 1886 is a trademark of Sony Interactive Entertainment.
 
 GNU GPL v2 or later (`LICENSE`). Third-party components keep their own licenses.
 
-## Wanna buy me a coffe? I'd appreciate it a lot!
-
+Wanna buy me a coffee? I'd appreciate it a lot!
 https://ko-fi.com/odefas <3
